@@ -3,13 +3,14 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ResponsesGateway, formatInput } from "../src/gateway.ts";
+import { ResponsesGateway, formatInput, toCodexInput } from "../src/gateway.ts";
 
 class FakeCodex {
   notifications: Array<(message: any) => void> = [];
   requests: Array<(request: any) => void> = [];
   toolMode = false;
   dynamicToolName = "";
+  turnInput: any[] = [];
 
   onNotification(listener: (message: any) => void): () => void {
     this.notifications.push(listener);
@@ -29,6 +30,7 @@ class FakeCodex {
     }
     if (method === "thread/resume") return { thread: { id: "thread-test" } };
     if (method === "turn/start") {
+      this.turnInput = params?.input || [];
       setImmediate(() => {
         if (this.toolMode) {
           this.emitRequest({
@@ -71,6 +73,20 @@ async function gateway(fake = new FakeCodex()): Promise<{ gateway: ResponsesGate
 
 test("formats Responses message input without protocol scaffolding", () => {
   assert.equal(formatInput([{ role: "user", content: [{ type: "input_text", text: "hello" }] }], "be concise"), "Developer instructions:\nbe concise\n\nuser: hello");
+});
+
+test("passes Responses image input to native Codex image input", () => {
+  const input = toCodexInput([{
+    role: "user",
+    content: [
+      { type: "input_text", text: "describe this" },
+      { type: "input_image", image_url: "data:image/png;base64,AA==", detail: "high" },
+    ],
+  }]);
+  assert.deepEqual(input, [
+    { type: "text", text: "user: describe this" },
+    { type: "image", url: "data:image/png;base64,AA==", detail: "high" },
+  ]);
 });
 
 test("returns a completed Responses text object", async () => {

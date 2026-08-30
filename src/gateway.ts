@@ -162,11 +162,11 @@ export class ResponsesGateway {
       });
       this.turns.set(threadId, session);
       phasePromise = session.phase.promise;
-      const prompt = formatInput(body.input, body.instructions);
-      if (!prompt.trim()) throw new Error("input must contain text");
+      const input = toCodexInput(body.input, body.instructions);
+      if (!input.length) throw new Error("input must contain text or an image");
       const result = await this.codex.request("turn/start", {
         threadId,
-        input: [{ type: "text", text: prompt }],
+        input,
         model,
         approvalPolicy: "never",
         sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" } },
@@ -486,6 +486,14 @@ function extractToolOutputs(input: unknown): Array<{ callId: string; output: str
 }
 
 export function formatInput(input: unknown, instructions?: unknown): string {
+  return toCodexInput(input, instructions)
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("\n\n");
+}
+
+export function toCodexInput(input: unknown, instructions?: unknown): JsonObject[] {
+  const result: JsonObject[] = [];
   const chunks: string[] = [];
   if (typeof instructions === "string" && instructions.trim()) chunks.push(`Developer instructions:\n${instructions}`);
   if (typeof input === "string") chunks.push(input);
@@ -493,12 +501,32 @@ export function formatInput(input: unknown, instructions?: unknown): string {
     for (const item of input) {
       if (!item || item.type === "function_call_output" || item.type === "compaction") continue;
       const role = typeof item.role === "string" ? item.role : "user";
-      if (typeof item.content === "string") chunks.push(`${role}: ${item.content}`);
+      if (item.type === "input_image") {
+        result.push(imageInput(item));
+      } else if (typeof item.content === "string") chunks.push(`${role}: ${item.content}`);
       else if (Array.isArray(item.content)) {
-        const text = item.content.map((part: JsonObject) => typeof part?.text === "string" ? part.text : "").filter(Boolean).join("\n");
+        const text = item.content
+          .map((part: JsonObject) => typeof part?.text === "string" ? part.text : "")
+          .filter(Boolean)
+          .join("\n");
         if (text) chunks.push(`${role}: ${text}`);
+        for (const part of item.content) {
+          if (part?.type === "input_image") result.push(imageInput(part));
+        }
       } else if (typeof item.text === "string") chunks.push(`${role}: ${item.text}`);
     }
   }
-  return chunks.join("\n\n");
+  if (chunks.length) result.unshift({ type: "text", text: chunks.join("\n\n") });
+  return result;
+}
+
+function imageInput(part: JsonObject): JsonObject {
+  if (typeof part.image_url !== "string" || !part.image_url) {
+    throw new Error("input_image.image_url must be a URL or data URL");
+  }
+  return {
+    type: "image",
+    url: part.image_url,
+    ...(typeof part.detail === "string" ? { detail: part.detail } : {}),
+  };
 }
