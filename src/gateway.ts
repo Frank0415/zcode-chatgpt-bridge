@@ -7,8 +7,8 @@ import { CodexClient, type RpcMessage, type ServerRequest } from "./codex.ts";
 type JsonObject = Record<string, any>;
 
 type SavedState = {
-  responses: Record<string, { threadId: string; model: string; createdAt: number }>;
-  compactions: Record<string, { threadId: string; model: string; createdAt: number }>;
+  responses: Record<string, { threadId: string; model: string; createdAt: number; toolNames?: Record<string, string> }>;
+  compactions: Record<string, { threadId: string; model: string; createdAt: number; toolNames?: Record<string, string> }>;
 };
 
 type Phase =
@@ -44,6 +44,7 @@ export class ResponsesGateway {
   private readonly loadedThreads = new Set<string>();
   private readonly turns = new Map<string, TurnSession>();
   private readonly pendingTools = new Map<string, PendingTool>();
+  private readonly toolNamesByThread = new Map<string, Map<string, string>>();
 
   constructor(codex = new CodexClient(), statePath = join(homedir(), ".config", "zcode-chatgpt-bridge", "responses.json")) {
     this.codex = codex;
@@ -200,7 +201,12 @@ export class ResponsesGateway {
       incomplete_details: null,
       usage: emptyUsage(),
     };
-    this.state.responses[responseId] = { threadId, model, createdAt };
+    this.state.responses[responseId] = {
+      threadId,
+      model,
+      createdAt,
+      ...this.savedToolNames(threadId),
+    };
     await this.saveState();
 
     if (phase.kind === "tool") {
@@ -235,8 +241,9 @@ export class ResponsesGateway {
     const id = `resp_${randomUUID().replaceAll("-", "")}`;
     const handle = `cmp_${randomUUID().replaceAll("-", "")}`;
     const createdAt = Math.floor(Date.now() / 1000);
-    this.state.compactions[handle] = { threadId, model, createdAt };
-    this.state.responses[id] = { threadId, model, createdAt };
+    const toolNames = this.savedToolNames(threadId);
+    this.state.compactions[handle] = { threadId, model, createdAt, ...toolNames };
+    this.state.responses[id] = { threadId, model, createdAt, ...toolNames };
     await this.saveState();
     return {
       id,
@@ -257,7 +264,7 @@ export class ResponsesGateway {
       await this.ensureThread(existing, model);
       return existing;
     }
-    const dynamicTools = mapTools(body.tools);
+    const mappedTools = mapTools(body.tools);
     const result = await this.codex.request("thread/start", {
       model,
       modelProvider: "openai",
@@ -265,21 +272,28 @@ export class ResponsesGateway {
       approvalPolicy: "never",
       sandbox: "read-only",
       serviceName: "zcode_chatgpt_bridge",
-      ...(dynamicTools.length ? { dynamicTools } : {}),
+      ...(mappedTools.tools.length ? { dynamicTools: mappedTools.tools } : {}),
     });
     const threadId = result?.thread?.id;
     if (!threadId) throw new Error("Codex did not return a thread id");
     this.loadedThreads.add(threadId);
+    this.toolNamesByThread.set(threadId, mappedTools.names);
     return threadId;
   }
 
   private threadFromBody(body: JsonObject): string | undefined {
     const previous = typeof body.previous_response_id === "string" ? this.state.responses[body.previous_response_id] : undefined;
-    if (previous) return previous.threadId;
+    if (previous) {
+      this.restoreToolNames(previous.threadId, previous.toolNames);
+      return previous.threadId;
+    }
     for (const item of Array.isArray(body.input) ? body.input : []) {
       if (item?.type === "compaction" && typeof item.encrypted_content === "string") {
         const saved = this.state.compactions[item.encrypted_content];
-        if (saved) return saved.threadId;
+        if (saved) {
+          this.restoreToolNames(saved.threadId, saved.toolNames);
+          return saved.threadId;
+        }
       }
     }
     return undefined;
@@ -352,7 +366,7 @@ export class ResponsesGateway {
         session.phase.resolve({
           kind: "tool",
           callId,
-          name: String(params.tool),
+          name: this.toolNamesByThread.get(session.threadId)?.get(String(params.tool)) || String(params.tool),
           arguments: JSON.stringify(params.arguments ?? {}),
         });
       }
@@ -393,6 +407,15 @@ export class ResponsesGateway {
     await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
     await rename(temporary, this.statePath);
   }
+
+  private savedToolNames(threadId: string): { toolNames?: Record<string, string> } {
+    const names = this.toolNamesByThread.get(threadId);
+    return names?.size ? { toolNames: Object.fromEntries(names) } : {};
+  }
+
+  private restoreToolNames(threadId: string, names?: Record<string, string>): void {
+    if (names && !this.toolNamesByThread.has(threadId)) this.toolNamesByThread.set(threadId, new Map(Object.entries(names)));
+  }
 }
 
 function deferred<T>(): Deferred<T> {
@@ -430,19 +453,29 @@ function emptyUsage(): JsonObject {
   };
 }
 
-function mapTools(tools: unknown): JsonObject[] {
-  if (!Array.isArray(tools)) return [];
-  return tools.flatMap((tool) => {
+function mapTools(tools: unknown): { tools: JsonObject[]; names: Map<string, string> } {
+  const names = new Map<string, string>();
+  if (!Array.isArray(tools)) return { tools: [], names };
+  const mapped = tools.flatMap((tool, index) => {
     if (!tool || tool.type !== "function") return [];
     const source = tool.function && typeof tool.function === "object" ? tool.function : tool;
     if (typeof source.name !== "string") return [];
+    const safeName = safeToolName(source.name, index);
+    names.set(safeName, source.name);
     return [{
       type: "function",
-      name: source.name,
-      description: typeof source.description === "string" ? source.description : "",
+      name: safeName,
+      description: `[ZCode tool: ${source.name}] ${typeof source.description === "string" ? source.description : ""}`,
       inputSchema: source.parameters || { type: "object", properties: {} },
     }];
   });
+  return { tools: mapped, names };
+}
+
+function safeToolName(name: string, index: number): string {
+  const sanitized = name.replace(/[^A-Za-z0-9_-]/g, "_");
+  const suffix = `_${index}`;
+  return `zcode_${sanitized}`.slice(0, 64 - suffix.length) + suffix;
 }
 
 function extractToolOutputs(input: unknown): Array<{ callId: string; output: string }> {

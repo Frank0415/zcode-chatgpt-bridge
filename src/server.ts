@@ -20,11 +20,16 @@ export async function startServer(gateway = new ResponsesGateway()): Promise<Bri
     try {
       await route(gateway, request, response, `http://${host}:${port}`);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       if (response.headersSent) {
+        response.write(`event: error\ndata: ${JSON.stringify({
+          type: "error",
+          sequence_number: 0,
+          error: { type: "server_error", code: "bridge_error", message, param: null },
+        })}\n\n`);
         response.end();
         return;
       }
-      const message = error instanceof Error ? error.message : String(error);
       sendJson(response, 400, { error: { message, type: "invalid_request_error", code: null } });
     }
   });

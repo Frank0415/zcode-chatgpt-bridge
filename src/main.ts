@@ -98,7 +98,8 @@ WantedBy=default.target
   }
 
   systemctl("daemon-reload");
-  systemctl("enable", "--now", "zcode-chatgpt-bridge.service");
+  systemctl("enable", "zcode-chatgpt-bridge.service");
+  systemctl("restart", "zcode-chatgpt-bridge.service");
   await waitForService();
   console.log(`Installed and running. Endpoint: ${endpoint}`);
 }

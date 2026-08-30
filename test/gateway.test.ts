@@ -9,6 +9,7 @@ class FakeCodex {
   notifications: Array<(message: any) => void> = [];
   requests: Array<(request: any) => void> = [];
   toolMode = false;
+  dynamicToolName = "";
 
   onNotification(listener: (message: any) => void): () => void {
     this.notifications.push(listener);
@@ -20,8 +21,12 @@ class FakeCodex {
     return () => undefined;
   }
 
-  async request(method: string): Promise<any> {
-    if (method === "thread/start") return { thread: { id: "thread-test" } };
+  async request(method: string, params?: any): Promise<any> {
+    if (method === "thread/start") {
+      this.dynamicToolName = params?.dynamicTools?.[0]?.name || "";
+      if (this.dynamicToolName.startsWith("mcp__")) throw new Error("dynamic tool name is reserved");
+      return { thread: { id: "thread-test" } };
+    }
     if (method === "thread/resume") return { thread: { id: "thread-test" } };
     if (method === "turn/start") {
       setImmediate(() => {
@@ -29,7 +34,7 @@ class FakeCodex {
           this.emitRequest({
             id: 7,
             method: "item/tool/call",
-            params: { threadId: "thread-test", turnId: "turn-test", callId: "call-test", tool: "read_file", arguments: { path: "a.txt" } },
+            params: { threadId: "thread-test", turnId: "turn-test", callId: "call-test", tool: this.dynamicToolName, arguments: { path: "a.txt" } },
             respond: () => {
               setImmediate(() => {
                 this.emit({ method: "item/agentMessage/delta", params: { threadId: "thread-test", delta: "tool result accepted" } });
@@ -85,12 +90,25 @@ test("round-trips Responses function calls through Codex dynamic tools", async (
     tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
   });
   assert.equal(first.output[0].type, "function_call");
+  assert.equal(first.output[0].name, "read_file");
   const second = await setup.gateway.create({
     model: "gpt-test",
     previous_response_id: first.id,
     input: [{ type: "function_call_output", call_id: first.output[0].call_id, output: "contents" }],
   });
   assert.equal(second.output_text, "tool result accepted");
+});
+
+test("maps ZCode MCP tool names around Codex reserved namespaces", async () => {
+  const setup = await gateway();
+  setup.fake.toolMode = true;
+  const result = await setup.gateway.create({
+    model: "gpt-test",
+    input: "use node",
+    tools: [{ type: "function", name: "mcp__node_repl__js", parameters: { type: "object" } }],
+  });
+  assert.match(setup.fake.dynamicToolName, /^zcode_/);
+  assert.equal(result.output[0].name, "mcp__node_repl__js");
 });
 
 test("returns a standard-shaped compaction backed by native Codex compaction", async () => {
