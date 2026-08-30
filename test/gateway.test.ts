@@ -11,6 +11,8 @@ class FakeCodex {
   toolMode = false;
   dynamicToolName = "";
   turnInput: any[] = [];
+  threadStarts = 0;
+  turnInputs: any[][] = [];
 
   onNotification(listener: (message: any) => void): () => void {
     this.notifications.push(listener);
@@ -24,6 +26,7 @@ class FakeCodex {
 
   async request(method: string, params?: any): Promise<any> {
     if (method === "thread/start") {
+      this.threadStarts += 1;
       this.dynamicToolName = params?.dynamicTools?.[0]?.name || "";
       if (this.dynamicToolName.startsWith("mcp__")) throw new Error("dynamic tool name is reserved");
       return { thread: { id: "thread-test" } };
@@ -31,6 +34,7 @@ class FakeCodex {
     if (method === "thread/resume") return { thread: { id: "thread-test" } };
     if (method === "turn/start") {
       this.turnInput = params?.input || [];
+      this.turnInputs.push(this.turnInput);
       setImmediate(() => {
         if (this.toolMode) {
           this.emitRequest({
@@ -95,6 +99,22 @@ test("returns a completed Responses text object", async () => {
   assert.equal(result.object, "response");
   assert.equal(result.output_text, "hello");
   assert.equal(result.output[0].type, "message");
+});
+
+test("continues the Codex thread from ZCode item references", async () => {
+  const setup = await gateway();
+  const first = await setup.gateway.create({ model: "gpt-test", input: "first" });
+  await setup.gateway.create({
+    model: "gpt-test",
+    input: [
+      { role: "developer", content: "old instructions" },
+      { role: "user", content: "first" },
+      { type: "item_reference", id: first.output[0].id },
+      { role: "user", content: "second" },
+    ],
+  });
+  assert.equal(setup.fake.threadStarts, 1);
+  assert.deepEqual(setup.fake.turnInputs[1], [{ type: "text", text: "user: second" }]);
 });
 
 test("round-trips Responses function calls through Codex dynamic tools", async () => {

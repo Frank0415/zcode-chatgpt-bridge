@@ -9,6 +9,7 @@ type JsonObject = Record<string, any>;
 type SavedState = {
   responses: Record<string, { threadId: string; model: string; createdAt: number; toolNames?: Record<string, string> }>;
   compactions: Record<string, { threadId: string; model: string; createdAt: number; toolNames?: Record<string, string> }>;
+  items: Record<string, { threadId: string; model: string; createdAt: number; toolNames?: Record<string, string> }>;
 };
 
 type Phase =
@@ -39,7 +40,7 @@ export type ResponseEvent = { type: string; [key: string]: unknown };
 export class ResponsesGateway {
   readonly codex: CodexClient;
   private readonly statePath: string;
-  private state: SavedState = { responses: {}, compactions: {} };
+  private state: SavedState = { responses: {}, compactions: {}, items: {} };
   private stateLoaded = false;
   private readonly loadedThreads = new Set<string>();
   private readonly turns = new Map<string, TurnSession>();
@@ -162,7 +163,7 @@ export class ResponsesGateway {
       });
       this.turns.set(threadId, session);
       phasePromise = session.phase.promise;
-      const input = toCodexInput(body.input, body.instructions);
+      const input = toCodexInput(this.newInput(body.input), body.instructions);
       if (!input.length) throw new Error("input must contain text or an image");
       const result = await this.codex.request("turn/start", {
         threadId,
@@ -207,6 +208,9 @@ export class ResponsesGateway {
       createdAt,
       ...this.savedToolNames(threadId),
     };
+    for (const item of output) {
+      if (typeof item.id === "string") this.state.items[item.id] = { threadId, model, createdAt, ...this.savedToolNames(threadId) };
+    }
     await this.saveState();
 
     if (phase.kind === "tool") {
@@ -287,7 +291,16 @@ export class ResponsesGateway {
       this.restoreToolNames(previous.threadId, previous.toolNames);
       return previous.threadId;
     }
-    for (const item of Array.isArray(body.input) ? body.input : []) {
+    const input = Array.isArray(body.input) ? body.input : [];
+    for (let index = input.length - 1; index >= 0; index--) {
+      const item = input[index];
+      if (item?.type === "item_reference" && typeof item.id === "string") {
+        const saved = this.state.items[item.id];
+        if (saved) {
+          this.restoreToolNames(saved.threadId, saved.toolNames);
+          return saved.threadId;
+        }
+      }
       if (item?.type === "compaction" && typeof item.encrypted_content === "string") {
         const saved = this.state.compactions[item.encrypted_content];
         if (saved) {
@@ -395,6 +408,7 @@ export class ResponsesGateway {
       this.state = {
         responses: value?.responses && typeof value.responses === "object" ? value.responses : {},
         compactions: value?.compactions && typeof value.compactions === "object" ? value.compactions : {},
+        items: value?.items && typeof value.items === "object" ? value.items : {},
       };
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
@@ -415,6 +429,16 @@ export class ResponsesGateway {
 
   private restoreToolNames(threadId: string, names?: Record<string, string>): void {
     if (names && !this.toolNamesByThread.has(threadId)) this.toolNamesByThread.set(threadId, new Map(Object.entries(names)));
+  }
+
+  private newInput(input: unknown): unknown {
+    if (!Array.isArray(input)) return input;
+    let boundary = -1;
+    for (let index = 0; index < input.length; index++) {
+      const item = input[index];
+      if (item?.type === "item_reference" && typeof item.id === "string" && this.state.items[item.id]) boundary = index;
+    }
+    return boundary < 0 ? input : input.slice(boundary + 1);
   }
 }
 
