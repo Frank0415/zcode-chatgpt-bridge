@@ -109,7 +109,8 @@ export class ResponsesGateway {
         part: { type: "output_text", text: "", annotations: [] },
       });
     };
-    const toolOutputs = extractToolOutputs(body.input);
+    const receivedToolOutputs = extractToolOutputs(body.input);
+    const toolOutputs = receivedToolOutputs.filter((output) => this.pendingTools.has(output.callId));
     let threadId: string;
     let phasePromise: Promise<Phase>;
     let session: TurnSession;
@@ -144,6 +145,7 @@ export class ResponsesGateway {
         });
       }
     } else {
+      if (receivedToolOutputs.length) throw new Error("No pending Codex tool call matches function_call_output");
       threadId = await this.resolveThread(body, model);
       if (this.turns.has(threadId)) throw new Error("The previous response is still waiting for a tool output");
       session = {

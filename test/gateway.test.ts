@@ -135,6 +135,24 @@ test("round-trips Responses function calls through Codex dynamic tools", async (
   assert.equal(second.output_text, "tool result accepted");
 });
 
+test("ignores replayed historical tool outputs when a current tool call is pending", async () => {
+  const setup = await gateway();
+  setup.fake.toolMode = true;
+  const first = await setup.gateway.create({
+    model: "gpt-test",
+    input: "read a file",
+    tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
+  });
+  const second = await setup.gateway.create({
+    model: "gpt-test",
+    input: [
+      { type: "function_call_output", call_id: "call-already-consumed", output: "old result" },
+      { type: "function_call_output", call_id: first.output[0].call_id, output: "current result" },
+    ],
+  });
+  assert.equal(second.output_text, "tool result accepted");
+});
+
 test("maps ZCode MCP tool names around Codex reserved namespaces", async () => {
   const setup = await gateway();
   setup.fake.toolMode = true;
