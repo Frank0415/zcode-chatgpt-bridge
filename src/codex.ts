@@ -88,7 +88,18 @@ export class CodexClient {
   }
 
   private async startProcess(): Promise<void> {
-    const child = spawn(process.env.CODEX_BIN || "codex", ["app-server", "--stdio"], {
+    const contextWindow = positiveIntegerEnvironment("BRIDGE_MODEL_CONTEXT_WINDOW", 1_000_000);
+    const autoCompactLimit = positiveIntegerEnvironment("BRIDGE_AUTO_COMPACT_TOKEN_LIMIT", 900_000);
+    if (autoCompactLimit >= contextWindow) {
+      throw new Error("BRIDGE_AUTO_COMPACT_TOKEN_LIMIT must be smaller than BRIDGE_MODEL_CONTEXT_WINDOW");
+    }
+    const child = spawn(process.env.CODEX_BIN || "codex", [
+      "-c", `model_context_window=${contextWindow}`,
+      "-c", `model_auto_compact_token_limit=${autoCompactLimit}`,
+      "-c", 'model_auto_compact_token_limit_scope="total"',
+      "app-server",
+      "--stdio",
+    ], {
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
     });
@@ -161,4 +172,12 @@ export class CodexClient {
     }
     this.pending.clear();
   }
+}
+
+function positiveIntegerEnvironment(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }

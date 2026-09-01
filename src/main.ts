@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "./server.ts";
@@ -21,7 +21,7 @@ async function main(): Promise<void> {
     case "start":
     case "stop":
     case "restart":
-      systemctl(command);
+      serviceControl(command);
       if (command !== "stop") await waitForService();
       console.log(command === "stop" ? "Service stopped." : `Service running. Endpoint: ${endpoint}`);
       return;
@@ -63,7 +63,6 @@ async function install(): Promise<void> {
   const userHome = homedir();
   const installRoot = join(userHome, ".local", "lib", "zcode-chatgpt-bridge");
   const binPath = join(userHome, ".local", "bin", "zcode-chatgpt-bridge");
-  const unitPath = join(userHome, ".config", "systemd", "user", "zcode-chatgpt-bridge.service");
   const sourceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
   await mkdir(installRoot, { recursive: true });
   if (sourceRoot !== installRoot) {
@@ -73,8 +72,12 @@ async function install(): Promise<void> {
   await mkdir(dirname(binPath), { recursive: true });
   const nodePath = process.execPath;
   await writeFile(binPath, `#!/bin/sh\nexec ${shellQuote(nodePath)} ${shellQuote(join(installRoot, "src", "main.ts"))} "$@"\n`, { mode: 0o755 });
-  await mkdir(dirname(unitPath), { recursive: true });
-  await writeFile(unitPath, `[Unit]
+  if (platform() === "darwin") {
+    await installLaunchAgent(userHome, nodePath, installRoot);
+  } else {
+    const unitPath = join(userHome, ".config", "systemd", "user", "zcode-chatgpt-bridge.service");
+    await mkdir(dirname(unitPath), { recursive: true });
+    await writeFile(unitPath, `[Unit]
 Description=Local OpenAI Responses bridge backed by Codex
 After=network-online.target
 
@@ -88,6 +91,10 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 `);
+    systemctl("daemon-reload");
+    systemctl("enable", "zcode-chatgpt-bridge.service");
+    systemctl("restart", "zcode-chatgpt-bridge.service");
+  }
 
   const oldDesktop = join(userHome, ".local", "share", "applications", "zcode-chatgpt-bridge.desktop");
   try {
@@ -97,9 +104,6 @@ WantedBy=default.target
     if (error?.code !== "ENOENT") throw error;
   }
 
-  systemctl("daemon-reload");
-  systemctl("enable", "zcode-chatgpt-bridge.service");
-  systemctl("restart", "zcode-chatgpt-bridge.service");
   await waitForService();
   console.log(`Installed and running. Endpoint: ${endpoint}`);
 }
@@ -119,13 +123,13 @@ async function login(mode: "browser" | "device"): Promise<void> {
   try {
     await get("/healthz");
   } catch {
-    systemctl("start");
+    serviceControl("start");
     await waitForService();
   }
   const result = await post("/bridge/login", { mode });
   if (result.authUrl) {
     console.log(`Open this URL to sign in:\n${result.authUrl}`);
-    const child = spawn("xdg-open", [result.authUrl], { detached: true, stdio: "ignore" });
+    const child = spawn(platform() === "darwin" ? "open" : "xdg-open", [result.authUrl], { detached: true, stdio: "ignore" });
     child.unref();
   } else if (result.verificationUrl && result.userCode) {
     console.log(`Open: ${result.verificationUrl}\nCode: ${result.userCode}`);
@@ -136,6 +140,101 @@ async function login(mode: "browser" | "device"): Promise<void> {
 function systemctl(...args: string[]): void {
   const result = spawnSync("systemctl", ["--user", ...args], { stdio: "inherit" });
   if (result.status !== 0) throw new Error(`systemctl --user ${args.join(" ")} failed`);
+}
+
+const launchAgentLabel = "com.frank0415.zcode-chatgpt-bridge";
+
+function serviceControl(command: "start" | "stop" | "restart"): void {
+  if (platform() !== "darwin") {
+    systemctl(command);
+    return;
+  }
+  const userHome = homedir();
+  const plistPath = join(userHome, "Library", "LaunchAgents", `${launchAgentLabel}.plist`);
+  const target = `gui/${process.getuid?.()}/${launchAgentLabel}`;
+  const loaded = spawnSync("launchctl", ["print", target], { stdio: "ignore" }).status === 0;
+  if (command === "stop" && loaded) {
+    launchctl("bootout", target);
+  }
+  if (command === "start" || command === "restart") {
+    if (loaded) launchctl("kickstart", "-k", target);
+    else launchctlBootstrap(`gui/${process.getuid?.()}`, plistPath);
+  }
+}
+
+async function installLaunchAgent(userHome: string, nodePath: string, installRoot: string): Promise<void> {
+  const agentsPath = join(userHome, "Library", "LaunchAgents");
+  const plistPath = join(agentsPath, `${launchAgentLabel}.plist`);
+  const logPath = join(userHome, "Library", "Logs", "zcode-chatgpt-bridge.log");
+  const target = `gui/${process.getuid?.()}/${launchAgentLabel}`;
+  const codexPath = commandPath("codex");
+  await mkdir(agentsPath, { recursive: true });
+  await mkdir(dirname(logPath), { recursive: true });
+  await writeFile(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${launchAgentLabel}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xmlEscape(nodePath)}</string>
+    <string>${xmlEscape(join(installRoot, "src", "main.ts"))}</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${xmlEscape(process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")}</string>
+    ${codexPath ? `<key>CODEX_BIN</key>\n    <string>${xmlEscape(codexPath)}</string>` : ""}
+    <key>BRIDGE_MODEL_CONTEXT_WINDOW</key>
+    <string>1000000</string>
+    <key>BRIDGE_AUTO_COMPACT_TOKEN_LIMIT</key>
+    <string>900000</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(logPath)}</string>
+</dict>
+</plist>
+`, { mode: 0o600 });
+  if (spawnSync("launchctl", ["print", target], { stdio: "ignore" }).status === 0) {
+    launchctl("bootout", target);
+  }
+  launchctlBootstrap(`gui/${process.getuid?.()}`, plistPath);
+}
+
+function launchctl(...args: string[]): void {
+  const result = spawnSync("launchctl", args, { stdio: "inherit" });
+  if (result.status !== 0) throw new Error(`launchctl ${args.join(" ")} failed`);
+}
+
+function launchctlBootstrap(domain: string, plistPath: string): void {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const result = spawnSync("launchctl", ["bootstrap", domain, plistPath], { encoding: "utf8" });
+    if (result.status === 0) return;
+    if (attempt < 9) {
+      spawnSync("/bin/sleep", ["0.1"]);
+      continue;
+    }
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+  }
+  throw new Error(`launchctl bootstrap ${domain} ${plistPath} failed`);
+}
+
+function commandPath(command: string): string | undefined {
+  const result = spawnSync("which", [command], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+function xmlEscape(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
 async function waitForService(): Promise<void> {

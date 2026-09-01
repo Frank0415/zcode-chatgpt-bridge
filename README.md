@@ -4,14 +4,16 @@ A small local service that lets ZCode use a ChatGPT/Codex subscription through a
 
 ## Install
 
-Requirements: Fedora or another systemd-based Linux desktop, Node.js 24 or newer, and the Codex CLI.
+Requirements: macOS or a systemd-based Linux desktop, Node.js 24 or newer, and the Codex CLI.
 
 ```bash
 make install
 zcode-chatgpt-bridge login
 ```
 
-The install command creates and starts a systemd user service. The service keeps running after the terminal closes and starts automatically with your user session.
+The install command creates and starts a launchd agent on macOS or a systemd user service on Linux. The service keeps running after the terminal closes and starts automatically with your user session.
+
+The bridge starts Codex with a 1,000,000-token context window and native automatic compaction at 900,000 total tokens. Override these defaults with `BRIDGE_MODEL_CONTEXT_WINDOW` and `BRIDGE_AUTO_COMPACT_TOKEN_LIMIT` when running the service manually.
 
 ## Add it to ZCode
 
@@ -22,6 +24,8 @@ Open ZCode Model Settings, add a custom provider, and enter:
 | Base URL | `http://127.0.0.1:9099/v1` |
 | API format | OpenAI Responses |
 | API key | Leave empty |
+
+Add `gpt-5.6-sol` and `gpt-5.6-luna` to the provider's model list with a 1,000,000-token context window and vision enabled.
 
 If ZCode requires text in the API key box, enter any placeholder. The local service ignores the `Authorization` header.
 
