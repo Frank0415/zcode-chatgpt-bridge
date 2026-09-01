@@ -145,7 +145,6 @@ export class ResponsesGateway {
         });
       }
     } else {
-      if (receivedToolOutputs.length) throw new Error("No pending Codex tool call matches function_call_output");
       threadId = await this.resolveThread(body, model);
       if (this.turns.has(threadId)) throw new Error("The previous response is still waiting for a tool output");
       session = {
@@ -166,7 +165,10 @@ export class ResponsesGateway {
       this.turns.set(threadId, session);
       phasePromise = session.phase.promise;
       const input = toCodexInput(this.newInput(body.input), body.instructions);
-      if (!input.length) throw new Error("input must contain text or an image");
+      if (!input.length) {
+        if (receivedToolOutputs.length) throw new Error("No pending Codex tool call matches function_call_output");
+        throw new Error("input must contain text or an image");
+      }
       const result = await this.codex.request("turn/start", {
         threadId,
         input,
@@ -439,6 +441,7 @@ export class ResponsesGateway {
     for (let index = 0; index < input.length; index++) {
       const item = input[index];
       if (item?.type === "item_reference" && typeof item.id === "string" && this.state.items[item.id]) boundary = index;
+      if (item?.type === "function_call_output") boundary = index;
     }
     return boundary < 0 ? input : input.slice(boundary + 1);
   }

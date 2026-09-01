@@ -153,6 +153,32 @@ test("ignores replayed historical tool outputs when a current tool call is pendi
   assert.equal(second.output_text, "tool result accepted");
 });
 
+test("continues with user input after a completed historical tool exchange", async () => {
+  const setup = await gateway();
+  setup.fake.toolMode = true;
+  const first = await setup.gateway.create({
+    model: "gpt-test",
+    input: "read a file",
+    tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
+  });
+  await setup.gateway.create({
+    model: "gpt-test",
+    input: [{ type: "function_call_output", call_id: first.output[0].call_id, output: "contents" }],
+  });
+  setup.fake.toolMode = false;
+  const continued = await setup.gateway.create({
+    model: "gpt-test",
+    input: [
+      { role: "user", content: "old question" },
+      { type: "function_call_output", call_id: first.output[0].call_id, output: "contents" },
+      { role: "assistant", content: "old answer" },
+      { role: "user", content: "new question" },
+    ],
+  });
+  assert.equal(continued.output_text, "hello");
+  assert.deepEqual(setup.fake.turnInput, [{ type: "text", text: "assistant: old answer\n\nuser: new question" }]);
+});
+
 test("maps ZCode MCP tool names around Codex reserved namespaces", async () => {
   const setup = await gateway();
   setup.fake.toolMode = true;
