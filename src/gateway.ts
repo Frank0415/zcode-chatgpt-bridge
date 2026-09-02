@@ -66,12 +66,18 @@ export class ResponsesGateway {
     const result = await this.codex.request("model/list", { limit: 100, includeHidden: false });
     return {
       object: "list",
-      data: (result?.data || []).map((model: JsonObject) => ({
-        id: model.id || model.model,
-        object: "model",
-        created: 0,
-        owned_by: "openai",
-      })),
+      data: (result?.data || []).map((model: JsonObject) => {
+        const id = model.id || model.model;
+        return {
+          id,
+          object: "model",
+          created: 0,
+          owned_by: "openai",
+          ...(["gpt-5.6-sol", "gpt-5.6-luna"].includes(id)
+            ? { context_window: 1_050_000, max_output_tokens: 128_000 }
+            : {}),
+        };
+      }),
     };
   }
 

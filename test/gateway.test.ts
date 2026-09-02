@@ -67,7 +67,7 @@ class FakeCodex {
       setImmediate(() => this.emit({ method: "item/completed", params: { threadId: "thread-test", item: { type: "contextCompaction" } } }));
       return {};
     }
-    if (method === "model/list") return { data: [{ id: "gpt-test" }] };
+    if (method === "model/list") return { data: [{ id: "gpt-test" }, { id: "gpt-5.6-sol" }, { id: "gpt-5.6-luna" }] };
     if (method === "account/read") return { account: null, requiresOpenaiAuth: true };
     return {};
   }
@@ -101,6 +101,16 @@ async function gateway(fake = new FakeCodex()): Promise<{ gateway: ResponsesGate
 
 test("formats Responses message input without protocol scaffolding", () => {
   assert.equal(formatInput([{ role: "user", content: [{ type: "input_text", text: "hello" }] }], "be concise"), "Developer instructions:\nbe concise\n\nuser: hello");
+});
+
+test("advertises GPT-5.6 long-context metadata", async () => {
+  const setup = await gateway();
+  const result = await setup.gateway.models();
+  for (const id of ["gpt-5.6-sol", "gpt-5.6-luna"]) {
+    const model = result.data.find((entry: any) => entry.id === id);
+    assert.equal(model.context_window, 1_050_000);
+    assert.equal(model.max_output_tokens, 128_000);
+  }
 });
 
 test("passes Responses image input to native Codex image input", () => {

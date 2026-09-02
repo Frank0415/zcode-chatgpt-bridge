@@ -94,7 +94,7 @@ export class CodexClient {
   }
 
   private async startProcess(): Promise<void> {
-    const contextWindow = positiveIntegerEnvironment("BRIDGE_MODEL_CONTEXT_WINDOW", 1_000_000);
+    const contextWindow = positiveIntegerEnvironment("BRIDGE_MODEL_CONTEXT_WINDOW", 1_050_000);
     const autoCompactLimit = positiveIntegerEnvironment("BRIDGE_AUTO_COMPACT_TOKEN_LIMIT", 900_000);
     if (autoCompactLimit >= contextWindow) {
       throw new Error("BRIDGE_AUTO_COMPACT_TOKEN_LIMIT must be smaller than BRIDGE_MODEL_CONTEXT_WINDOW");

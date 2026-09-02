@@ -194,7 +194,7 @@ async function installLaunchAgent(userHome: string, nodePath: string, installRoo
     <string>${xmlEscape(process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")}</string>
     ${codexPath ? `<key>CODEX_BIN</key>\n    <string>${xmlEscape(codexPath)}</string>` : ""}
     <key>BRIDGE_MODEL_CONTEXT_WINDOW</key>
-    <string>1000000</string>
+    <string>1050000</string>
     <key>BRIDGE_AUTO_COMPACT_TOKEN_LIMIT</key>
     <string>900000</string>
     <key>BRIDGE_LOG_LEVEL</key>
