@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { CodexClient, type RpcMessage, type ServerRequest } from "./codex.ts";
+import { errorFields, log } from "./log.ts";
 
 type JsonObject = Record<string, any>;
 
@@ -22,8 +23,10 @@ type Deferred<T> = {
 };
 
 type TurnSession = {
+  responseId: string;
   threadId: string;
   turnId?: string;
+  startedAt: number;
   text: string;
   phase: Deferred<Phase>;
   phaseDone: boolean;
@@ -33,6 +36,7 @@ type TurnSession = {
 type PendingTool = {
   session: TurnSession;
   request: ServerRequest;
+  timeout: ReturnType<typeof setTimeout>;
 };
 
 export type ResponseEvent = { type: string; [key: string]: unknown };
@@ -42,10 +46,14 @@ export class ResponsesGateway {
   private readonly statePath: string;
   private state: SavedState = { responses: {}, compactions: {}, items: {} };
   private stateLoaded = false;
+  private stateWrite = Promise.resolve();
   private readonly loadedThreads = new Set<string>();
   private readonly turns = new Map<string, TurnSession>();
   private readonly pendingTools = new Map<string, PendingTool>();
   private readonly toolNamesByThread = new Map<string, Map<string, string>>();
+  private readonly parentThreads = new Map<string, string>();
+  private readonly turnTimeoutMs = positiveIntegerEnvironment("BRIDGE_TURN_TIMEOUT_MS", 600_000);
+  private readonly toolOutputTimeoutMs = positiveIntegerEnvironment("BRIDGE_TOOL_OUTPUT_TIMEOUT_MS", 300_000);
 
   constructor(codex = new CodexClient(), statePath = join(homedir(), ".config", "zcode-chatgpt-bridge", "responses.json")) {
     this.codex = codex;
@@ -92,6 +100,13 @@ export class ResponsesGateway {
     const responseId = `resp_${randomUUID().replaceAll("-", "")}`;
     const createdAt = Math.floor(Date.now() / 1000);
     const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
+    log("info", "response.start", {
+      response_id: responseId,
+      model,
+      stream: Boolean(emit),
+      tool_count: Array.isArray(body.tools) ? body.tools.length : 0,
+      has_previous_response: typeof body.previous_response_id === "string",
+    });
     let messageStreamStarted = false;
     const startMessageStream = () => {
       if (messageStreamStarted) return;
@@ -139,16 +154,25 @@ export class ResponsesGateway {
       phasePromise = session.phase.promise;
       for (const entry of pending) {
         this.pendingTools.delete(entry.output.callId);
+        clearTimeout(entry.pending!.timeout);
+        log("info", "tool.output.received", {
+          response_id: responseId,
+          thread_id: session.threadId,
+          call_id: entry.output.callId,
+        });
         entry.pending!.request.respond({
           success: true,
           contentItems: [{ type: "inputText", text: entry.output.output }],
         });
       }
+      this.activatePendingTool(session);
     } else {
       threadId = await this.resolveThread(body, model);
       if (this.turns.has(threadId)) throw new Error("The previous response is still waiting for a tool output");
       session = {
+        responseId,
         threadId,
+        startedAt: Date.now(),
         text: "",
         phase: deferred<Phase>(),
         phaseDone: false,
@@ -166,21 +190,29 @@ export class ResponsesGateway {
       phasePromise = session.phase.promise;
       const input = toCodexInput(this.newInput(body.input), body.instructions);
       if (!input.length) {
+        this.turns.delete(threadId);
         if (receivedToolOutputs.length) throw new Error("No pending Codex tool call matches function_call_output");
         throw new Error("input must contain text or an image");
       }
-      const result = await this.codex.request("turn/start", {
-        threadId,
-        input,
-        model,
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" } },
-        ...(body.reasoning?.effort ? { effort: body.reasoning.effort } : {}),
-      });
-      session.turnId = result?.turn?.id;
+      try {
+        const result = await this.codex.request("turn/start", {
+          threadId,
+          input,
+          model,
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" } },
+          ...(body.reasoning?.effort ? { effort: body.reasoning.effort } : {}),
+        });
+        session.turnId = result?.turn?.id;
+        log("info", "turn.start", { response_id: responseId, thread_id: threadId, turn_id: session.turnId, model });
+      } catch (error) {
+        this.turns.delete(threadId);
+        log("error", "turn.start.failed", { response_id: responseId, thread_id: threadId, ...errorFields(error) });
+        throw error;
+      }
     }
 
-    const phase = await phasePromise;
+    const phase = await this.waitForPhase(session, phasePromise);
     const output = phase.kind === "tool"
       ? [{
           id: `fc_${randomUUID().replaceAll("-", "")}`,
@@ -229,6 +261,14 @@ export class ResponsesGateway {
       emit?.({ type: "response.output_item.done", output_index: 0, item: output[0] });
     }
     emit?.({ type: "response.completed", response });
+    log("info", "response.complete", {
+      response_id: responseId,
+      thread_id: threadId,
+      turn_id: session.turnId,
+      phase: phase.kind,
+      status: response.status,
+      duration_ms: Date.now() - session.startedAt,
+    });
     return response;
   }
 
@@ -245,6 +285,7 @@ export class ResponsesGateway {
     const threadId = this.threadFromBody(body);
     if (!threadId) throw new Error("previous_response_id or a bridge compaction item is required");
     await this.ensureThread(threadId, model);
+    log("info", "compaction.start", { thread_id: threadId, model });
     await this.waitForCompaction(threadId);
     const id = `resp_${randomUUID().replaceAll("-", "")}`;
     const handle = `cmp_${randomUUID().replaceAll("-", "")}`;
@@ -253,6 +294,7 @@ export class ResponsesGateway {
     this.state.compactions[handle] = { threadId, model, createdAt, ...toolNames };
     this.state.responses[id] = { threadId, model, createdAt, ...toolNames };
     await this.saveState();
+    log("info", "compaction.complete", { thread_id: threadId, model, response_id: id, compaction_id: handle });
     return {
       id,
       object: "response.compaction",
@@ -286,6 +328,7 @@ export class ResponsesGateway {
     if (!threadId) throw new Error("Codex did not return a thread id");
     this.loadedThreads.add(threadId);
     this.toolNamesByThread.set(threadId, mappedTools.names);
+    log("info", "thread.start", { thread_id: threadId, model, tool_count: mappedTools.tools.length });
     return threadId;
   }
 
@@ -320,6 +363,7 @@ export class ResponsesGateway {
     if (this.loadedThreads.has(threadId)) return;
     await this.codex.request("thread/resume", { threadId, model });
     this.loadedThreads.add(threadId);
+    log("info", "thread.resume", { thread_id: threadId, model });
   }
 
   private async waitForCompaction(threadId: string): Promise<void> {
@@ -348,6 +392,15 @@ export class ResponsesGateway {
 
   private onNotification(message: RpcMessage): void {
     const params = message.params || {};
+    if (message.method === "thread/started") {
+      const threadId = params.thread?.id;
+      const parentThreadId = params.thread?.parentThreadId;
+      if (typeof threadId === "string" && typeof parentThreadId === "string") {
+        this.parentThreads.set(threadId, parentThreadId);
+        log("info", "subagent.thread.started", { thread_id: threadId, parent_thread_id: parentThreadId });
+      }
+      return;
+    }
     const session = typeof params.threadId === "string" ? this.turns.get(params.threadId) : undefined;
     if (!session) return;
     if (message.method === "item/agentMessage/delta" && typeof params.delta === "string") {
@@ -365,28 +418,53 @@ export class ResponsesGateway {
       const error = params.turn?.status === "failed" ? params.turn?.error?.message || "Codex turn failed" : undefined;
       session.phase.resolve({ kind: "message", text: session.text, ...(error ? { error } : {}) });
       this.turns.delete(session.threadId);
+      this.forgetDescendants(session.threadId);
+      log(error ? "error" : "info", "turn.complete", {
+        response_id: session.responseId,
+        thread_id: session.threadId,
+        turn_id: params.turn?.id || session.turnId,
+        status: params.turn?.status,
+        ...(error ? { error_message: error } : {}),
+      });
     }
   }
 
   private onServerRequest(request: ServerRequest): void {
     if (request.method === "item/tool/call") {
       const params = request.params || {};
-      const session = this.turns.get(params.threadId);
+      const session = this.sessionForToolThread(params.threadId);
       if (!session) {
+        log("warn", "tool.call.unroutable", { thread_id: params.threadId, turn_id: params.turnId, call_id: params.callId, tool: params.tool });
         request.reject(-32004, "No active Responses request for this tool call");
         return;
       }
       const callId = String(params.callId);
-      this.pendingTools.set(callId, { session, request });
-      if (!session.phaseDone) {
-        session.phaseDone = true;
-        session.phase.resolve({
-          kind: "tool",
-          callId,
-          name: this.toolNamesByThread.get(session.threadId)?.get(String(params.tool)) || String(params.tool),
-          arguments: JSON.stringify(params.arguments ?? {}),
+      const timeout = setTimeout(() => {
+        const pending = this.pendingTools.get(callId);
+        if (!pending) return;
+        this.pendingTools.delete(callId);
+        pending.request.reject(-32008, "Timed out waiting for function_call_output");
+        log("error", "tool.output.timeout", {
+          response_id: session.responseId,
+          thread_id: params.threadId,
+          root_thread_id: session.threadId,
+          call_id: callId,
+          tool: params.tool,
+          timeout_ms: this.toolOutputTimeoutMs,
         });
-      }
+      }, this.toolOutputTimeoutMs);
+      timeout.unref?.();
+      this.pendingTools.set(callId, { session, request, timeout });
+      log("info", "tool.call", {
+        response_id: session.responseId,
+        thread_id: params.threadId,
+        root_thread_id: session.threadId,
+        turn_id: params.turnId,
+        call_id: callId,
+        tool: params.tool,
+        from_subagent: params.threadId !== session.threadId,
+      });
+      this.activatePendingTool(session);
       return;
     }
     if (request.method === "currentTime/read") {
@@ -420,10 +498,14 @@ export class ResponsesGateway {
   }
 
   private async saveState(): Promise<void> {
-    await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.statePath}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
-    await rename(temporary, this.statePath);
+    const write = this.stateWrite.then(async () => {
+      await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
+      const temporary = `${this.statePath}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
+      await rename(temporary, this.statePath);
+    });
+    this.stateWrite = write.catch(() => undefined);
+    await write;
   }
 
   private savedToolNames(threadId: string): { toolNames?: Record<string, string> } {
@@ -445,6 +527,96 @@ export class ResponsesGateway {
     }
     return boundary < 0 ? input : input.slice(boundary + 1);
   }
+
+  private activatePendingTool(session: TurnSession): void {
+    if (session.phaseDone) return;
+    const entry = [...this.pendingTools.entries()].find(([, pending]) => pending.session === session);
+    if (!entry) return;
+    const [callId, pending] = entry;
+    const params = pending.request.params || {};
+    session.phaseDone = true;
+    session.phase.resolve({
+      kind: "tool",
+      callId,
+      name: this.toolNamesByThread.get(session.threadId)?.get(String(params.tool)) || String(params.tool),
+      arguments: JSON.stringify(params.arguments ?? {}),
+    });
+  }
+
+  private sessionForToolThread(threadId: unknown): TurnSession | undefined {
+    if (typeof threadId !== "string") return undefined;
+    let current: string | undefined = threadId;
+    const visited = new Set<string>();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      const session = this.turns.get(current);
+      if (session) return session;
+      current = this.parentThreads.get(current);
+    }
+    if (this.turns.size === 1) {
+      const session = this.turns.values().next().value as TurnSession | undefined;
+      if (session) {
+        log("warn", "tool.call.single_session_fallback", { thread_id: threadId, root_thread_id: session.threadId });
+        return session;
+      }
+    }
+    return undefined;
+  }
+
+  private async waitForPhase(session: TurnSession, phase: Promise<Phase>): Promise<Phase> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        phase,
+        new Promise<Phase>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`Codex turn timed out after ${this.turnTimeoutMs}ms`)), this.turnTimeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      this.turns.delete(session.threadId);
+      this.rejectPendingTools(session, "Codex turn timed out");
+      this.forgetDescendants(session.threadId);
+      log("error", "turn.timeout", {
+        response_id: session.responseId,
+        thread_id: session.threadId,
+        turn_id: session.turnId,
+        timeout_ms: this.turnTimeoutMs,
+      });
+      if (session.turnId) {
+        void this.codex.request("turn/interrupt", { threadId: session.threadId, turnId: session.turnId }, 30_000).catch((interruptError) => {
+          log("warn", "turn.interrupt.failed", { thread_id: session.threadId, turn_id: session.turnId, ...errorFields(interruptError) });
+        });
+      }
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private rejectPendingTools(session: TurnSession, message: string): void {
+    for (const [callId, pending] of this.pendingTools) {
+      if (pending.session !== session) continue;
+      clearTimeout(pending.timeout);
+      this.pendingTools.delete(callId);
+      pending.request.reject(-32008, message);
+    }
+  }
+
+  private forgetDescendants(rootThreadId: string): void {
+    for (const threadId of this.parentThreads.keys()) {
+      let current: string | undefined = threadId;
+      const visited = new Set<string>();
+      while (current && !visited.has(current)) {
+        visited.add(current);
+        const parent = this.parentThreads.get(current);
+        if (parent === rootThreadId) {
+          this.parentThreads.delete(threadId);
+          break;
+        }
+        current = parent;
+      }
+    }
+  }
 }
 
 function deferred<T>(): Deferred<T> {
@@ -456,6 +628,14 @@ function deferred<T>(): Deferred<T> {
 function requiredString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
   return value;
+}
+
+function positiveIntegerEnvironment(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }
 
 function responseShell(id: string, model: string, createdAt: number, status: string): JsonObject {

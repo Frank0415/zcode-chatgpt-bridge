@@ -9,10 +9,15 @@ class FakeCodex {
   notifications: Array<(message: any) => void> = [];
   requests: Array<(request: any) => void> = [];
   toolMode = false;
+  childToolMode = false;
+  parallelToolMode = false;
+  failTurnStartOnce = false;
   dynamicToolName = "";
   turnInput: any[] = [];
   threadStarts = 0;
   turnInputs: any[][] = [];
+  toolResponses = 0;
+  expectedToolResponses = 1;
 
   onNotification(listener: (message: any) => void): () => void {
     this.notifications.push(listener);
@@ -33,22 +38,24 @@ class FakeCodex {
     }
     if (method === "thread/resume") return { thread: { id: "thread-test" } };
     if (method === "turn/start") {
+      if (this.failTurnStartOnce) {
+        this.failTurnStartOnce = false;
+        throw new Error("turn start failed");
+      }
       this.turnInput = params?.input || [];
       this.turnInputs.push(this.turnInput);
       setImmediate(() => {
-        if (this.toolMode) {
-          this.emitRequest({
-            id: 7,
-            method: "item/tool/call",
-            params: { threadId: "thread-test", turnId: "turn-test", callId: "call-test", tool: this.dynamicToolName, arguments: { path: "a.txt" } },
-            respond: () => {
-              setImmediate(() => {
-                this.emit({ method: "item/agentMessage/delta", params: { threadId: "thread-test", delta: "tool result accepted" } });
-                this.emit({ method: "turn/completed", params: { threadId: "thread-test", turn: { status: "completed" } } });
-              });
-            },
-            reject: () => undefined,
-          });
+        if (this.childToolMode) {
+          this.expectedToolResponses = 1;
+          this.emit({ method: "thread/started", params: { thread: { id: "thread-child", parentThreadId: "thread-test" } } });
+          this.emitRequest(this.toolRequest("thread-child", "call-child", 7));
+        } else if (this.parallelToolMode) {
+          this.expectedToolResponses = 2;
+          this.emitRequest(this.toolRequest("thread-test", "call-one", 7));
+          this.emitRequest(this.toolRequest("thread-test", "call-two", 8));
+        } else if (this.toolMode) {
+          this.expectedToolResponses = 1;
+          this.emitRequest(this.toolRequest("thread-test", "call-test", 7));
         } else {
           this.emit({ method: "item/agentMessage/delta", params: { threadId: "thread-test", delta: "hello" } });
           this.emit({ method: "turn/completed", params: { threadId: "thread-test", turn: { status: "completed" } } });
@@ -68,6 +75,23 @@ class FakeCodex {
   async close(): Promise<void> {}
   emit(message: any): void { for (const listener of this.notifications) listener(message); }
   emitRequest(message: any): void { for (const listener of this.requests) listener(message); }
+
+  toolRequest(threadId: string, callId: string, id: number): any {
+    return {
+      id,
+      method: "item/tool/call",
+      params: { threadId, turnId: "turn-test", callId, tool: this.dynamicToolName, arguments: { path: "a.txt" } },
+      respond: () => {
+        this.toolResponses += 1;
+        if (this.toolResponses !== this.expectedToolResponses) return;
+        setImmediate(() => {
+          this.emit({ method: "item/agentMessage/delta", params: { threadId: "thread-test", delta: "tool result accepted" } });
+          this.emit({ method: "turn/completed", params: { threadId: "thread-test", turn: { status: "completed" } } });
+        });
+      },
+      reject: () => undefined,
+    };
+  }
 }
 
 async function gateway(fake = new FakeCodex()): Promise<{ gateway: ResponsesGateway; fake: FakeCodex }> {
@@ -133,6 +157,55 @@ test("round-trips Responses function calls through Codex dynamic tools", async (
     input: [{ type: "function_call_output", call_id: first.output[0].call_id, output: "contents" }],
   });
   assert.equal(second.output_text, "tool result accepted");
+});
+
+test("routes subagent dynamic tool calls through the parent Responses session", async () => {
+  const setup = await gateway();
+  setup.fake.childToolMode = true;
+  const first = await setup.gateway.create({
+    model: "gpt-test",
+    input: "delegate a lookup",
+    tools: [{ type: "function", name: "lookup_value", parameters: { type: "object" } }],
+  });
+  assert.equal(first.output[0].type, "function_call");
+  assert.equal(first.output[0].call_id, "call-child");
+  const second = await setup.gateway.create({
+    model: "gpt-test",
+    previous_response_id: first.id,
+    input: [{ type: "function_call_output", call_id: "call-child", output: "value" }],
+  });
+  assert.equal(second.output_text, "tool result accepted");
+});
+
+test("drains concurrent tool calls without leaving the Codex turn stuck", async () => {
+  const setup = await gateway();
+  setup.fake.parallelToolMode = true;
+  const first = await setup.gateway.create({
+    model: "gpt-test",
+    input: "run two tools",
+    tools: [{ type: "function", name: "lookup_value", parameters: { type: "object" } }],
+  });
+  assert.equal(first.output[0].call_id, "call-one");
+  const second = await setup.gateway.create({
+    model: "gpt-test",
+    previous_response_id: first.id,
+    input: [{ type: "function_call_output", call_id: "call-one", output: "one" }],
+  });
+  assert.equal(second.output[0].call_id, "call-two");
+  const third = await setup.gateway.create({
+    model: "gpt-test",
+    previous_response_id: second.id,
+    input: [{ type: "function_call_output", call_id: "call-two", output: "two" }],
+  });
+  assert.equal(third.output_text, "tool result accepted");
+});
+
+test("cleans up an active session when turn/start fails", async () => {
+  const setup = await gateway();
+  setup.fake.failTurnStartOnce = true;
+  await assert.rejects(setup.gateway.create({ model: "gpt-test", input: "first" }), /turn start failed/);
+  const recovered = await setup.gateway.create({ model: "gpt-test", input: "second" });
+  assert.equal(recovered.output_text, "hello");
 });
 
 test("ignores replayed historical tool outputs when a current tool call is pending", async () => {
