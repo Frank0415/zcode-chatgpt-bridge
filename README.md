@@ -21,7 +21,7 @@ Installation also adds the managed native ZCode subagent `~/.zcode/agents/chatgp
 
 ## Add it to ZCode
 
-Open ZCode Model Settings, add a custom provider, and enter:
+Open ZCode Model Settings, add a custom provider named `ChatGPT`, and enter:
 
 | Setting | Value |
 | --- | --- |

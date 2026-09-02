@@ -120,7 +120,8 @@ WantedBy=default.target
 
   await waitForService();
   console.log(`Installed and running. Endpoint: ${endpoint}\nIsolated Codex home: ${runtime.paths.codexHome}`);
-  if (zcode.changed) console.log(`ZCode reasoning variants updated: ${zcode.models.join(", ")}`);
+  if (zcode.models.length) console.log(`ZCode reasoning variants updated: ${zcode.models.join(", ")}`);
+  if (zcode.providerRenamed) console.log("ZCode provider renamed: ChatGPT");
   if (zcodeAgent.changed) console.log(`ZCode Luna Max subagent installed: ${zcodeAgent.agentPath}`);
   if (zcodeAgent.conflict) console.log(`ZCode Luna Max subagent not changed because an unmanaged file exists: ${zcodeAgent.agentPath}`);
 }
@@ -249,9 +250,10 @@ async function showLogs(args: string[]): Promise<void> {
 async function configureZCode(): Promise<void> {
   const reasoning = await configureZCodeReasoning();
   const agent = await configureZCodeLunaMaxAgent();
-  console.log(reasoning.changed
+  console.log(reasoning.models.length
     ? `Updated reasoning variants for: ${reasoning.models.join(", ")}`
     : "No matching ZCode ChatGPT Bridge models needed an update.");
+  if (reasoning.providerRenamed) console.log("Renamed the ZCode provider to ChatGPT.");
   console.log(agent.changed
     ? `Installed native Luna Max subagent: ${agent.agentPath}`
     : agent.conflict

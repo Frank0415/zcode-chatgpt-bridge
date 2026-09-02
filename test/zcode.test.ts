@@ -30,9 +30,11 @@ test("adds Max to matching ZCode bridge models without changing unrelated provid
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o640 });
   const first = await configureZCodeReasoning(configPath);
   assert.equal(first.changed, true);
+  assert.equal(first.providerRenamed, true);
   assert.deepEqual(new Set(first.models), new Set(["gpt-5.6-sol", "gpt-5.6-luna"]));
 
   const updated = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(updated.provider.bridge.name, "ChatGPT");
   assert.deepEqual(updated.provider.bridge.models["gpt-5.6-sol"].reasoning.variants, [...gpt56SolReasoningVariants]);
   assert.deepEqual(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.variants, [...gpt56LunaReasoningVariants]);
   assert.equal(updated.provider.bridge.models["gpt-5.6-sol"].reasoning.defaultVariant, "high");
@@ -45,13 +47,19 @@ test("adds Max to matching ZCode bridge models without changing unrelated provid
 
   const second = await configureZCodeReasoning(configPath);
   assert.equal(second.changed, false);
+  assert.equal(second.providerRenamed, false);
 });
 
 test("is a no-op when ZCode has no matching bridge provider", async () => {
   const directory = await mkdtemp(join(tmpdir(), "zcode-reasoning-noop-test-"));
   const configPath = join(directory, "config.json");
   await writeFile(configPath, '{"provider":{}}\n');
-  assert.deepEqual(await configureZCodeReasoning(configPath), { changed: false, configPath, models: [] });
+  assert.deepEqual(await configureZCodeReasoning(configPath), {
+    changed: false,
+    configPath,
+    models: [],
+    providerRenamed: false,
+  });
 });
 
 test("installs an isolated native ZCode Luna Max subagent idempotently", async () => {

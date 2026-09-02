@@ -19,6 +19,7 @@ export type ZCodeReasoningUpdate = {
   changed: boolean;
   configPath: string;
   models: string[];
+  providerRenamed: boolean;
 };
 
 export type ZCodeAgentUpdate = {
@@ -52,13 +53,18 @@ export async function configureZCodeReasoning(
   try {
     source = await readFile(configPath, "utf8");
   } catch (error: any) {
-    if (error?.code === "ENOENT") return { changed: false, configPath, models: [] };
+    if (error?.code === "ENOENT") return { changed: false, configPath, models: [], providerRenamed: false };
     throw error;
   }
   const config = JSON.parse(source);
   const updatedModels: string[] = [];
+  let providerRenamed = false;
   for (const provider of Object.values(config?.provider || {}) as any[]) {
     if (normalizeUrl(provider?.options?.baseURL) !== "http://127.0.0.1:9099/v1") continue;
+    if (provider.name !== "ChatGPT") {
+      provider.name = "ChatGPT";
+      providerRenamed = true;
+    }
     for (const [modelId, model] of Object.entries(provider?.models || {}) as Array<[string, any]>) {
       if (modelId !== "gpt-5.6-sol" && modelId !== "gpt-5.6-luna") continue;
       const existing = model?.reasoning && typeof model.reasoning === "object" ? model.reasoning : {};
@@ -74,14 +80,16 @@ export async function configureZCodeReasoning(
       updatedModels.push(modelId);
     }
   }
-  if (!updatedModels.length) return { changed: false, configPath, models: [] };
+  if (!updatedModels.length && !providerRenamed) {
+    return { changed: false, configPath, models: [], providerRenamed: false };
+  }
 
   const fileMode = (await stat(configPath)).mode & 0o777;
   const temporary = join(dirname(configPath), `.config.json.zcode-chatgpt-bridge-${process.pid}`);
   await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: fileMode });
   await rename(temporary, configPath);
   await chmod(configPath, fileMode);
-  return { changed: true, configPath, models: [...new Set(updatedModels)] };
+  return { changed: true, configPath, models: [...new Set(updatedModels)], providerRenamed };
 }
 
 export async function configureZCodeLunaMaxAgent(
