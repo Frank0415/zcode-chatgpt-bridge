@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { CodexClient, type RpcMessage, type ServerRequest } from "./codex.ts";
 import { errorFields, log } from "./log.ts";
 import { bridgeRuntimePaths } from "./runtime.ts";
-import { reasoningVariantsForModel } from "./zcode.ts";
+import { defaultReasoningEffortForModel, reasoningVariantsForModel } from "./zcode.ts";
 
 type JsonObject = Record<string, any>;
 
@@ -92,7 +92,7 @@ export class ResponsesGateway {
                 reasoning: {
                   enabled: true,
                   variants: reasoningVariantsForModel(id),
-                  defaultVariant: id === "gpt-5.6-luna" ? "max" : "high",
+                  defaultVariant: defaultReasoningEffortForModel(id),
                 },
               }
             : {}),
@@ -232,7 +232,8 @@ export class ResponsesGateway {
         throw new Error("input must contain text or an image");
       }
       try {
-        const effort = body.reasoning?.effort || body.reasoning_effort;
+        const requestedEffort = body.reasoning?.effort || body.reasoning_effort;
+        const effort = requestedEffort || defaultReasoningEffortForModel(model);
         const summary = body.reasoning?.summary;
         const serviceTier = body.service_tier || body.serviceTier;
         const outputSchema = body.text?.format?.schema || body.response_format?.json_schema?.schema;
@@ -254,6 +255,7 @@ export class ResponsesGateway {
           turn_id: session.turnId,
           model,
           reasoning_effort: effort,
+          reasoning_effort_source: requestedEffort ? "request" : effort ? "model_default" : undefined,
           reasoning_summary: summary,
           service_tier: serviceTier,
           has_output_schema: Boolean(outputSchema),

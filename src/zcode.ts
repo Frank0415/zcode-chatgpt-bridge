@@ -9,6 +9,12 @@ export function reasoningVariantsForModel(modelId: string): readonly string[] {
   return modelId === "gpt-5.6-luna" ? gpt56LunaReasoningVariants : gpt56SolReasoningVariants;
 }
 
+export function defaultReasoningEffortForModel(modelId: string): string | undefined {
+  if (modelId === "gpt-5.6-luna") return "max";
+  if (modelId === "gpt-5.6-sol") return "high";
+  return undefined;
+}
+
 export type ZCodeReasoningUpdate = {
   changed: boolean;
   configPath: string;
@@ -61,7 +67,7 @@ export async function configureZCodeReasoning(
         ...existing,
         enabled: true,
         variants,
-        defaultVariant: modelId === "gpt-5.6-luna" ? "max" : "high",
+        defaultVariant: defaultReasoningEffortForModel(modelId),
       };
       if (JSON.stringify(model.reasoning) === JSON.stringify(reasoning)) continue;
       model.reasoning = reasoning;

@@ -161,6 +161,20 @@ test("passes the Max reasoning-effort choice through to Codex", async () => {
   assert.equal(setup.fake.turnStarts.at(-1).effort, "max");
 });
 
+test("fills omitted GPT-5.6 reasoning effort from the advertised model default", async () => {
+  const luna = await gateway();
+  await luna.gateway.create({ model: "gpt-5.6-luna", input: "use default" });
+  assert.equal(luna.fake.turnStarts.at(-1).effort, "max");
+
+  const sol = await gateway();
+  await sol.gateway.create({ model: "gpt-5.6-sol", input: "use default" });
+  assert.equal(sol.fake.turnStarts.at(-1).effort, "high");
+
+  const explicit = await gateway();
+  await explicit.gateway.create({ model: "gpt-5.6-sol", reasoning: { effort: "medium" }, input: "use medium" });
+  assert.equal(explicit.fake.turnStarts.at(-1).effort, "medium");
+});
+
 test("passes ZCode developer messages as app-server developer instructions", async () => {
   const setup = await gateway();
   await setup.gateway.create({
