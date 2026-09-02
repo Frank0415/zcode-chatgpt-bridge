@@ -38,6 +38,10 @@ class FakeCodex {
       return { thread: { id: this.uniqueThreads ? `thread-${this.threadStarts}` : "thread-test" } };
     }
     if (method === "thread/resume") return { thread: { id: "thread-test" } };
+    if (method === "thread/read") {
+      const threadId = String(params?.threadId || "");
+      return { thread: { id: threadId, parentThreadId: threadId.endsWith("-child") ? threadId.slice(0, -"-child".length) : null } };
+    }
     if (method === "turn/start") {
       if (this.failTurnStartOnce) {
         this.failTurnStartOnce = false;
@@ -50,19 +54,6 @@ class FakeCodex {
         if (this.childToolMode) {
           const childThreadId = `${rootThreadId}-child`;
           this.expectedToolResponses.set(rootThreadId, 1);
-          this.emit({
-            method: "item/started",
-            params: {
-              threadId: rootThreadId,
-              item: {
-                type: "collabAgentToolCall",
-                senderThreadId: rootThreadId,
-                receiverThreadIds: [childThreadId],
-                tool: "spawnAgent",
-                status: "completed",
-              },
-            },
-          });
           this.emitRequest(this.toolRequest(rootThreadId, childThreadId, `call-${childThreadId}`, 7));
         } else if (this.parallelToolMode) {
           this.expectedToolResponses.set(rootThreadId, 2);

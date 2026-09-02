@@ -451,40 +451,7 @@ export class ResponsesGateway {
 
   private onServerRequest(request: ServerRequest): void {
     if (request.method === "item/tool/call") {
-      const params = request.params || {};
-      const session = this.sessionForToolThread(params.threadId);
-      if (!session) {
-        log("warn", "tool.call.unroutable", { thread_id: params.threadId, turn_id: params.turnId, call_id: params.callId, tool: params.tool });
-        request.reject(-32004, "No active Responses request for this tool call");
-        return;
-      }
-      const callId = String(params.callId);
-      const timeout = setTimeout(() => {
-        const pending = this.pendingTools.get(callId);
-        if (!pending) return;
-        this.pendingTools.delete(callId);
-        pending.request.reject(-32008, "Timed out waiting for function_call_output");
-        log("error", "tool.output.timeout", {
-          response_id: session.responseId,
-          thread_id: params.threadId,
-          root_thread_id: session.threadId,
-          call_id: callId,
-          tool: params.tool,
-          timeout_ms: this.toolOutputTimeoutMs,
-        });
-      }, this.toolOutputTimeoutMs);
-      timeout.unref?.();
-      this.pendingTools.set(callId, { session, request, timeout });
-      log("info", "tool.call", {
-        response_id: session.responseId,
-        thread_id: params.threadId,
-        root_thread_id: session.threadId,
-        turn_id: params.turnId,
-        call_id: callId,
-        tool: params.tool,
-        from_subagent: params.threadId !== session.threadId,
-      });
-      this.activatePendingTool(session);
+      void this.handleToolCall(request);
       return;
     }
     if (request.method === "currentTime/read") {
@@ -500,6 +467,43 @@ export class ResponsesGateway {
       return;
     }
     request.reject(-32601, `Unsupported app-server request: ${request.method}`);
+  }
+
+  private async handleToolCall(request: ServerRequest): Promise<void> {
+    const params = request.params || {};
+    const session = await this.resolveToolSession(params.threadId);
+    if (!session) {
+      log("warn", "tool.call.unroutable", { thread_id: params.threadId, turn_id: params.turnId, call_id: params.callId, tool: params.tool });
+      request.reject(-32004, "No active Responses request for this tool call");
+      return;
+    }
+    const callId = String(params.callId);
+    const timeout = setTimeout(() => {
+      const pending = this.pendingTools.get(callId);
+      if (!pending) return;
+      this.pendingTools.delete(callId);
+      pending.request.reject(-32008, "Timed out waiting for function_call_output");
+      log("error", "tool.output.timeout", {
+        response_id: session.responseId,
+        thread_id: params.threadId,
+        root_thread_id: session.threadId,
+        call_id: callId,
+        tool: params.tool,
+        timeout_ms: this.toolOutputTimeoutMs,
+      });
+    }, this.toolOutputTimeoutMs);
+    timeout.unref?.();
+    this.pendingTools.set(callId, { session, request, timeout });
+    log("info", "tool.call", {
+      response_id: session.responseId,
+      thread_id: params.threadId,
+      root_thread_id: session.threadId,
+      turn_id: params.turnId,
+      call_id: callId,
+      tool: params.tool,
+      from_subagent: params.threadId !== session.threadId,
+    });
+    this.activatePendingTool(session);
   }
 
   private async loadState(): Promise<void> {
@@ -563,7 +567,7 @@ export class ResponsesGateway {
     });
   }
 
-  private sessionForToolThread(threadId: unknown): TurnSession | undefined {
+  private sessionForToolThread(threadId: unknown, allowSingleSessionFallback = true): TurnSession | undefined {
     if (typeof threadId !== "string") return undefined;
     let current: string | undefined = threadId;
     const visited = new Set<string>();
@@ -573,7 +577,7 @@ export class ResponsesGateway {
       if (session) return session;
       current = this.parentThreads.get(current);
     }
-    if (this.turns.size === 1) {
+    if (allowSingleSessionFallback && this.turns.size === 1) {
       const session = this.turns.values().next().value as TurnSession | undefined;
       if (session) {
         log("warn", "tool.call.single_session_fallback", { thread_id: threadId, root_thread_id: session.threadId });
@@ -581,6 +585,30 @@ export class ResponsesGateway {
       }
     }
     return undefined;
+  }
+
+  private async resolveToolSession(threadId: unknown): Promise<TurnSession | undefined> {
+    const known = this.sessionForToolThread(threadId, false);
+    if (known || typeof threadId !== "string") return known;
+    let current = threadId;
+    const visited = new Set<string>();
+    while (!visited.has(current)) {
+      visited.add(current);
+      try {
+        const result = await this.codex.request("thread/read", { threadId: current, includeTurns: false }, 30_000);
+        const parentThreadId = result?.thread?.parentThreadId;
+        if (typeof parentThreadId !== "string" || !parentThreadId) break;
+        this.parentThreads.set(current, parentThreadId);
+        log("info", "subagent.thread.resolved", { thread_id: current, parent_thread_id: parentThreadId });
+        const session = this.sessionForToolThread(parentThreadId, false);
+        if (session) return session;
+        current = parentThreadId;
+      } catch (error) {
+        log("warn", "subagent.thread.resolve_failed", { thread_id: current, ...errorFields(error) });
+        break;
+      }
+    }
+    return this.sessionForToolThread(threadId, true);
   }
 
   private async waitForPhase(session: TurnSession, phase: Promise<Phase>): Promise<Phase> {
