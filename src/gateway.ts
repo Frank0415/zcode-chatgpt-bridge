@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { CodexClient, type RpcMessage, type ServerRequest } from "./codex.ts";
 import { errorFields, log } from "./log.ts";
 import { bridgeRuntimePaths } from "./runtime.ts";
-import { gpt56ReasoningVariants } from "./zcode.ts";
+import { reasoningVariantsForModel } from "./zcode.ts";
 
 type JsonObject = Record<string, any>;
 
@@ -89,7 +89,11 @@ export class ResponsesGateway {
             ? {
                 context_window: 1_050_000,
                 max_output_tokens: 128_000,
-                reasoning: { enabled: true, variants: gpt56ReasoningVariants, defaultVariant: "medium" },
+                reasoning: {
+                  enabled: true,
+                  variants: reasoningVariantsForModel(id),
+                  defaultVariant: id === "gpt-5.6-luna" ? "max" : "high",
+                },
               }
             : {}),
         };

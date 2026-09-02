@@ -2,7 +2,12 @@ import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promise
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const gpt56ReasoningVariants = ["low", "medium", "high", "xhigh", "max"] as const;
+export const gpt56SolReasoningVariants = ["medium", "high", "xhigh"] as const;
+export const gpt56LunaReasoningVariants = ["max"] as const;
+
+export function reasoningVariantsForModel(modelId: string): readonly string[] {
+  return modelId === "gpt-5.6-luna" ? gpt56LunaReasoningVariants : gpt56SolReasoningVariants;
+}
 
 export type ZCodeReasoningUpdate = {
   changed: boolean;
@@ -51,7 +56,7 @@ export async function configureZCodeReasoning(
     for (const [modelId, model] of Object.entries(provider?.models || {}) as Array<[string, any]>) {
       if (modelId !== "gpt-5.6-sol" && modelId !== "gpt-5.6-luna") continue;
       const existing = model?.reasoning && typeof model.reasoning === "object" ? model.reasoning : {};
-      const variants = mergeVariants(existing.variants);
+      const variants = [...reasoningVariantsForModel(modelId)];
       const reasoning = {
         ...existing,
         enabled: true,
@@ -95,13 +100,6 @@ export async function configureZCodeLunaMaxAgent(
   await rename(temporary, agentPath);
   await chmod(agentPath, 0o600);
   return { changed: true, agentPath, conflict: false };
-}
-
-function mergeVariants(value: unknown): string[] {
-  const existing = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-  const normalized = new Set(existing.map((entry) => entry.trim()).filter(Boolean));
-  for (const variant of gpt56ReasoningVariants) normalized.add(variant);
-  return [...gpt56ReasoningVariants, ...normalized].filter((variant, index, all) => all.indexOf(variant) === index);
 }
 
 function normalizeUrl(value: unknown): string {

@@ -3,7 +3,12 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { configureZCodeLunaMaxAgent, configureZCodeReasoning, gpt56ReasoningVariants } from "../src/zcode.ts";
+import {
+  configureZCodeLunaMaxAgent,
+  configureZCodeReasoning,
+  gpt56LunaReasoningVariants,
+  gpt56SolReasoningVariants,
+} from "../src/zcode.ts";
 
 test("adds Max to matching ZCode bridge models without changing unrelated provider data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "zcode-reasoning-test-"));
@@ -28,9 +33,8 @@ test("adds Max to matching ZCode bridge models without changing unrelated provid
   assert.deepEqual(new Set(first.models), new Set(["gpt-5.6-sol", "gpt-5.6-luna"]));
 
   const updated = JSON.parse(await readFile(configPath, "utf8"));
-  for (const id of ["gpt-5.6-sol", "gpt-5.6-luna"]) {
-    assert.deepEqual(updated.provider.bridge.models[id].reasoning.variants.slice(0, 5), [...gpt56ReasoningVariants]);
-  }
+  assert.deepEqual(updated.provider.bridge.models["gpt-5.6-sol"].reasoning.variants, [...gpt56SolReasoningVariants]);
+  assert.deepEqual(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.variants, [...gpt56LunaReasoningVariants]);
   assert.equal(updated.provider.bridge.models["gpt-5.6-sol"].reasoning.defaultVariant, "high");
   assert.equal(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.defaultVariant, "max");
   assert.deepEqual(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.aliases, { extra: "xhigh" });

@@ -137,8 +137,17 @@ test("advertises GPT-5.6 long-context metadata", async () => {
     const model = result.data.find((entry: any) => entry.id === id);
     assert.equal(model.context_window, 1_050_000);
     assert.equal(model.max_output_tokens, 128_000);
-    assert.deepEqual(model.reasoning.variants, ["low", "medium", "high", "xhigh", "max"]);
   }
+  assert.deepEqual(result.data.find((entry: any) => entry.id === "gpt-5.6-sol").reasoning, {
+    enabled: true,
+    variants: ["medium", "high", "xhigh"],
+    defaultVariant: "high",
+  });
+  assert.deepEqual(result.data.find((entry: any) => entry.id === "gpt-5.6-luna").reasoning, {
+    enabled: true,
+    variants: ["max"],
+    defaultVariant: "max",
+  });
 });
 
 test("passes the Max reasoning-effort choice through to Codex", async () => {

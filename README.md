@@ -31,7 +31,7 @@ Open ZCode Model Settings, add a custom provider, and enter:
 
 Add `gpt-5.6-sol` and `gpt-5.6-luna` to the provider's model list with a 1,050,000-token context window and vision enabled. The `/v1/models` response also advertises the 1,050,000-token context window and 128,000-token maximum output for these models.
 
-The installer adds `max` to the ZCode reasoning-effort choices for both models while preserving Low, Medium, High, and Extra high. It sets the global ZCode default to `max` for `gpt-5.6-luna` and `high` for `gpt-5.6-sol`; the bridge forwards the effort ZCode sends without subagent-specific rewriting. Run `zcode-chatgpt-bridge configure-zcode` after recreating the provider, then start a new ZCode task so the defaults are reloaded.
+The installer restricts ZCode's reasoning-effort choices to `max` for `gpt-5.6-luna`, and `medium`, `high`, and `xhigh` for `gpt-5.6-sol`. The global defaults are `max` for Luna and `high` for Sol; the bridge forwards the effort ZCode sends without subagent-specific rewriting. Run `zcode-chatgpt-bridge configure-zcode` after recreating the provider, then start a new ZCode task so the choices and defaults are reloaded.
 
 If ZCode requires text in the API key box, enter any placeholder. The local service ignores the `Authorization` header.
 
