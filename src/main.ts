@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareBridgeRuntime } from "./runtime.ts";
 import { startServer } from "./server.ts";
+import { configureZCodeReasoning } from "./zcode.ts";
 
 const endpoint = "http://127.0.0.1:9099/v1";
 const controlOrigin = "http://127.0.0.1:9099";
@@ -50,6 +51,9 @@ async function main(): Promise<void> {
     case "log-path":
       console.log(logPath());
       return;
+    case "configure-zcode":
+      await configureZCode();
+      return;
     default:
       printHelp();
   }
@@ -80,6 +84,7 @@ async function install(): Promise<void> {
   const nodePath = process.execPath;
   await writeFile(binPath, `#!/bin/sh\nexec ${shellQuote(nodePath)} ${shellQuote(join(installRoot, "src", "main.ts"))} "$@"\n`, { mode: 0o755 });
   const runtime = await prepareBridgeRuntime();
+  const zcode = await configureZCodeReasoning();
   if (platform() === "darwin") {
     await installLaunchAgent(userHome, nodePath, installRoot);
   } else {
@@ -114,6 +119,7 @@ WantedBy=default.target
 
   await waitForService();
   console.log(`Installed and running. Endpoint: ${endpoint}\nIsolated Codex home: ${runtime.paths.codexHome}`);
+  if (zcode.changed) console.log(`ZCode reasoning variants updated: ${zcode.models.join(", ")}`);
 }
 
 async function status(): Promise<void> {
@@ -237,6 +243,13 @@ async function showLogs(args: string[]): Promise<void> {
   });
 }
 
+async function configureZCode(): Promise<void> {
+  const result = await configureZCodeReasoning();
+  console.log(result.changed
+    ? `Updated reasoning variants for: ${result.models.join(", ")}\nRestart or refresh ZCode to load Max.`
+    : "No matching ZCode ChatGPT Bridge models needed an update.");
+}
+
 function logPath(userHome = homedir()): string {
   return platform() === "darwin"
     ? join(userHome, "Library", "Logs", "zcode-chatgpt-bridge.log")
@@ -317,6 +330,7 @@ function printHelp(): void {
   login [device]   sign in with ChatGPT
   logout           sign out
   models           list models available to this ChatGPT account
+  configure-zcode  add Max to ZCode reasoning-effort choices
   logs [N] [-f]    show the latest structured bridge logs
   log-path         show where bridge logs are stored`);
 }

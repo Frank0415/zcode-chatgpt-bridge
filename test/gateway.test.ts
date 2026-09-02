@@ -17,6 +17,7 @@ class FakeCodex {
   turnInput: any[] = [];
   threadStarts = 0;
   turnInputs: any[][] = [];
+  turnStarts: any[] = [];
   toolResponses = new Map<string, number>();
   expectedToolResponses = new Map<string, number>();
 
@@ -49,6 +50,7 @@ class FakeCodex {
       }
       this.turnInput = params?.input || [];
       this.turnInputs.push(this.turnInput);
+      this.turnStarts.push(params);
       setImmediate(() => {
         const rootThreadId = params?.threadId || "thread-test";
         if (this.childToolMode) {
@@ -117,7 +119,19 @@ test("advertises GPT-5.6 long-context metadata", async () => {
     const model = result.data.find((entry: any) => entry.id === id);
     assert.equal(model.context_window, 1_050_000);
     assert.equal(model.max_output_tokens, 128_000);
+    assert.deepEqual(model.reasoning.variants, ["low", "medium", "high", "xhigh", "max"]);
   }
+});
+
+test("passes the Max reasoning-effort choice through to Codex", async () => {
+  const setup = await gateway();
+  await setup.gateway.create({
+    model: "gpt-5.6-sol",
+    reasoning: { effort: "max" },
+    input: "think hard",
+  });
+  assert.equal(setup.fake.turnStarts.at(-1).model, "gpt-5.6-sol");
+  assert.equal(setup.fake.turnStarts.at(-1).effort, "max");
 });
 
 test("passes Responses image input to native Codex image input", () => {

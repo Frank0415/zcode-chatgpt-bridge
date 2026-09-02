@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { CodexClient, type RpcMessage, type ServerRequest } from "./codex.ts";
 import { errorFields, log } from "./log.ts";
 import { bridgeRuntimePaths } from "./runtime.ts";
+import { gpt56ReasoningVariants } from "./zcode.ts";
 
 type JsonObject = Record<string, any>;
 
@@ -75,7 +76,11 @@ export class ResponsesGateway {
           created: 0,
           owned_by: "openai",
           ...(["gpt-5.6-sol", "gpt-5.6-luna"].includes(id)
-            ? { context_window: 1_050_000, max_output_tokens: 128_000 }
+            ? {
+                context_window: 1_050_000,
+                max_output_tokens: 128_000,
+                reasoning: { enabled: true, variants: gpt56ReasoningVariants, defaultVariant: "medium" },
+              }
             : {}),
         };
       }),
@@ -206,16 +211,17 @@ export class ResponsesGateway {
         throw new Error("input must contain text or an image");
       }
       try {
+        const effort = body.reasoning?.effort;
         const result = await this.codex.request("turn/start", {
           threadId,
           input,
           model,
           approvalPolicy: "never",
           sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" } },
-          ...(body.reasoning?.effort ? { effort: body.reasoning.effort } : {}),
+          ...(effort ? { effort } : {}),
         });
         session.turnId = result?.turn?.id;
-        log("info", "turn.start", { response_id: responseId, thread_id: threadId, turn_id: session.turnId, model });
+        log("info", "turn.start", { response_id: responseId, thread_id: threadId, turn_id: session.turnId, model, reasoning_effort: effort });
       } catch (error) {
         this.turns.delete(threadId);
         log("error", "turn.start.failed", { response_id: responseId, thread_id: threadId, ...errorFields(error) });

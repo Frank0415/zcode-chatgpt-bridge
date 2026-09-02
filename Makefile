@@ -3,6 +3,7 @@
 check:
 	@node --check src/log.ts
 	@node --check src/runtime.ts
+	@node --check src/zcode.ts
 	@node --check src/codex.ts
 	@node --check src/gateway.ts
 	@node --check src/server.ts
