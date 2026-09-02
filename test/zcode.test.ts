@@ -3,7 +3,7 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { configureZCodeReasoning, gpt56ReasoningVariants } from "../src/zcode.ts";
+import { configureZCodeLunaMaxAgent, configureZCodeReasoning, gpt56ReasoningVariants } from "../src/zcode.ts";
 
 test("adds Max to matching ZCode bridge models without changing unrelated provider data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "zcode-reasoning-test-"));
@@ -47,4 +47,31 @@ test("is a no-op when ZCode has no matching bridge provider", async () => {
   const configPath = join(directory, "config.json");
   await writeFile(configPath, '{"provider":{}}\n');
   assert.deepEqual(await configureZCodeReasoning(configPath), { changed: false, configPath, models: [] });
+});
+
+test("installs an isolated native ZCode Luna Max subagent idempotently", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-agent-test-"));
+  const agentPath = join(directory, "agents", "chatgpt-bridge-luna-max.md");
+  const first = await configureZCodeLunaMaxAgent(agentPath);
+  assert.deepEqual(first, { changed: true, agentPath, conflict: false });
+
+  const contents = await readFile(agentPath, "utf8");
+  assert.match(contents, /name: chatgpt-bridge-luna-max/);
+  assert.match(contents, /model: gpt-5\.6-luna/);
+  assert.match(contents, /thoughtLevel: max/);
+  assert.match(contents, /injectAgentsMd: false/);
+  assert.match(contents, /Do not call SendMessage to \/root/);
+  assert.equal((await stat(agentPath)).mode & 0o777, 0o600);
+
+  assert.deepEqual(await configureZCodeLunaMaxAgent(agentPath), { changed: false, agentPath, conflict: false });
+});
+
+test("preserves an unmanaged ZCode subagent file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-agent-conflict-test-"));
+  const agentPath = join(directory, "chatgpt-bridge-luna-max.md");
+  await writeFile(agentPath, "user-owned\n", { mode: 0o640 });
+
+  assert.deepEqual(await configureZCodeLunaMaxAgent(agentPath), { changed: false, agentPath, conflict: true });
+  assert.equal(await readFile(agentPath, "utf8"), "user-owned\n");
+  assert.equal((await stat(agentPath)).mode & 0o777, 0o640);
 });

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareBridgeRuntime } from "./runtime.ts";
 import { startServer } from "./server.ts";
-import { configureZCodeReasoning } from "./zcode.ts";
+import { configureZCodeLunaMaxAgent, configureZCodeReasoning } from "./zcode.ts";
 
 const endpoint = "http://127.0.0.1:9099/v1";
 const controlOrigin = "http://127.0.0.1:9099";
@@ -85,6 +85,7 @@ async function install(): Promise<void> {
   await writeFile(binPath, `#!/bin/sh\nexec ${shellQuote(nodePath)} ${shellQuote(join(installRoot, "src", "main.ts"))} "$@"\n`, { mode: 0o755 });
   const runtime = await prepareBridgeRuntime();
   const zcode = await configureZCodeReasoning();
+  const zcodeAgent = await configureZCodeLunaMaxAgent();
   if (platform() === "darwin") {
     await installLaunchAgent(userHome, nodePath, installRoot);
   } else {
@@ -120,6 +121,8 @@ WantedBy=default.target
   await waitForService();
   console.log(`Installed and running. Endpoint: ${endpoint}\nIsolated Codex home: ${runtime.paths.codexHome}`);
   if (zcode.changed) console.log(`ZCode reasoning variants updated: ${zcode.models.join(", ")}`);
+  if (zcodeAgent.changed) console.log(`ZCode Luna Max subagent installed: ${zcodeAgent.agentPath}`);
+  if (zcodeAgent.conflict) console.log(`ZCode Luna Max subagent not changed because an unmanaged file exists: ${zcodeAgent.agentPath}`);
 }
 
 async function status(): Promise<void> {
@@ -244,10 +247,17 @@ async function showLogs(args: string[]): Promise<void> {
 }
 
 async function configureZCode(): Promise<void> {
-  const result = await configureZCodeReasoning();
-  console.log(result.changed
-    ? `Updated reasoning variants for: ${result.models.join(", ")}\nRestart or refresh ZCode to load Max.`
+  const reasoning = await configureZCodeReasoning();
+  const agent = await configureZCodeLunaMaxAgent();
+  console.log(reasoning.changed
+    ? `Updated reasoning variants for: ${reasoning.models.join(", ")}`
     : "No matching ZCode ChatGPT Bridge models needed an update.");
+  console.log(agent.changed
+    ? `Installed native Luna Max subagent: ${agent.agentPath}`
+    : agent.conflict
+      ? `Preserved unmanaged subagent file: ${agent.agentPath}`
+      : `Native Luna Max subagent is current: ${agent.agentPath}`);
+  console.log("Start a new ZCode task to load model and subagent changes.");
 }
 
 function logPath(userHome = homedir()): string {
@@ -330,7 +340,7 @@ function printHelp(): void {
   login [device]   sign in with ChatGPT
   logout           sign out
   models           list models available to this ChatGPT account
-  configure-zcode  add Max to ZCode reasoning-effort choices
+  configure-zcode  add Max reasoning and the native Luna Max subagent to ZCode
   logs [N] [-f]    show the latest structured bridge logs
   log-path         show where bridge logs are stored`);
 }
