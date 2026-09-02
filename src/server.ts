@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { ResponsesGateway, type ResponseEvent } from "./gateway.ts";
+import { errorFields, log } from "./log.ts";
 
 export type BridgeServer = {
   close: () => Promise<void>;
@@ -12,6 +14,27 @@ export async function startServer(gateway = new ResponsesGateway()): Promise<Bri
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("BRIDGE_PORT must be a valid TCP port");
 
   const server = createServer(async (request, response) => {
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+    response.setHeader("X-Request-Id", requestId);
+    log("info", "http.request", { request_id: requestId, method: request.method, path: request.url });
+    response.once("finish", () => log("info", "http.response", {
+      request_id: requestId,
+      method: request.method,
+      path: request.url,
+      status: response.statusCode,
+      duration_ms: Date.now() - startedAt,
+    }));
+    response.once("close", () => {
+      if (!response.writableEnded) {
+        log("warn", "http.client_disconnected", {
+          request_id: requestId,
+          method: request.method,
+          path: request.url,
+          duration_ms: Date.now() - startedAt,
+        });
+      }
+    });
     setCommonHeaders(response);
     if (request.method === "OPTIONS") {
       response.writeHead(204).end();
@@ -21,6 +44,13 @@ export async function startServer(gateway = new ResponsesGateway()): Promise<Bri
       await route(gateway, request, response, `http://${host}:${port}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      log("error", "http.request.failed", {
+        request_id: requestId,
+        method: request.method,
+        path: request.url,
+        duration_ms: Date.now() - startedAt,
+        ...errorFields(error),
+      });
       if (response.headersSent) {
         response.write(`event: error\ndata: ${JSON.stringify({
           type: "error",
@@ -38,12 +68,14 @@ export async function startServer(gateway = new ResponsesGateway()): Promise<Bri
     server.once("error", reject);
     server.listen(port, host, resolve);
   });
+  log("info", "bridge.listening", { host, port, endpoint: `http://${host}:${port}/v1` });
 
   return {
     endpoint: `http://${host}:${port}/v1`,
     close: async () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       await gateway.close();
+      log("info", "bridge.closed", { host, port });
     },
   };
 }

@@ -43,6 +43,12 @@ async function main(): Promise<void> {
       for (const model of result.data || []) console.log(model.id);
       return;
     }
+    case "logs":
+      await showLogs(args);
+      return;
+    case "log-path":
+      console.log(logPath());
+      return;
     default:
       printHelp();
   }
@@ -165,11 +171,11 @@ function serviceControl(command: "start" | "stop" | "restart"): void {
 async function installLaunchAgent(userHome: string, nodePath: string, installRoot: string): Promise<void> {
   const agentsPath = join(userHome, "Library", "LaunchAgents");
   const plistPath = join(agentsPath, `${launchAgentLabel}.plist`);
-  const logPath = join(userHome, "Library", "Logs", "zcode-chatgpt-bridge.log");
+  const serviceLogPath = logPath(userHome);
   const target = `gui/${process.getuid?.()}/${launchAgentLabel}`;
   const codexPath = commandPath("codex");
   await mkdir(agentsPath, { recursive: true });
-  await mkdir(dirname(logPath), { recursive: true });
+  await mkdir(dirname(serviceLogPath), { recursive: true });
   await writeFile(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -191,15 +197,17 @@ async function installLaunchAgent(userHome: string, nodePath: string, installRoo
     <string>1000000</string>
     <key>BRIDGE_AUTO_COMPACT_TOKEN_LIMIT</key>
     <string>900000</string>
+    <key>BRIDGE_LOG_LEVEL</key>
+    <string>info</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>${xmlEscape(logPath)}</string>
+  <string>${xmlEscape(serviceLogPath)}</string>
   <key>StandardErrorPath</key>
-  <string>${xmlEscape(logPath)}</string>
+  <string>${xmlEscape(serviceLogPath)}</string>
 </dict>
 </plist>
 `, { mode: 0o600 });
@@ -207,6 +215,29 @@ async function installLaunchAgent(userHome: string, nodePath: string, installRoo
     launchctl("bootout", target);
   }
   launchctlBootstrap(`gui/${process.getuid?.()}`, plistPath);
+}
+
+async function showLogs(args: string[]): Promise<void> {
+  const follow = args.includes("--follow") || args.includes("-f");
+  const countArgument = args.find((value) => /^\d+$/.test(value));
+  const count = countArgument || "200";
+  const command = platform() === "darwin" ? "tail" : "journalctl";
+  const commandArgs = platform() === "darwin"
+    ? ["-n", count, ...(follow ? ["-f"] : []), logPath()]
+    : ["--user", "-u", "zcode-chatgpt-bridge.service", "-n", count, ...(follow ? ["-f"] : [])];
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, commandArgs, { stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => code === 0 || signal === "SIGINT"
+      ? resolve()
+      : reject(new Error(`${command} exited (${code ?? signal ?? "unknown"})`)));
+  });
+}
+
+function logPath(userHome = homedir()): string {
+  return platform() === "darwin"
+    ? join(userHome, "Library", "Logs", "zcode-chatgpt-bridge.log")
+    : "journalctl --user -u zcode-chatgpt-bridge.service";
 }
 
 function launchctl(...args: string[]): void {
@@ -282,7 +313,9 @@ function printHelp(): void {
   endpoint         print the OpenAI-compatible base URL
   login [device]   sign in with ChatGPT
   logout           sign out
-  models           list models available to this ChatGPT account`);
+  models           list models available to this ChatGPT account
+  logs [N] [-f]    show the latest structured bridge logs
+  log-path         show where bridge logs are stored`);
 }
 
 main().catch((error) => {

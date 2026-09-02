@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
+import { errorFields, log } from "./log.ts";
 
 export type RpcMessage = {
   id?: number | string;
@@ -11,6 +12,8 @@ export type RpcMessage = {
 };
 
 type PendingRequest = {
+  method: string;
+  startedAt: number;
   resolve: (value: any) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
@@ -53,13 +56,16 @@ export class CodexClient {
 
   private requestNow(method: string, params?: unknown, timeoutMs = 300_000): Promise<any> {
     const id = this.nextId++;
+    const startedAt = Date.now();
     const result = new Promise<any>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(String(id));
+        log("error", "codex.rpc.timeout", { rpc_id: id, rpc_method: method, duration_ms: Date.now() - startedAt });
         reject(new Error(`Codex app-server timed out: ${method}`));
       }, timeoutMs);
-      this.pending.set(String(id), { resolve, reject, timeout });
+      this.pending.set(String(id), { method, startedAt, resolve, reject, timeout });
     });
+    log("info", "codex.rpc.request", { rpc_id: id, rpc_method: method, timeout_ms: timeoutMs });
     this.send({ id, method, ...(params === undefined ? {} : { params }) });
     return result;
   }
@@ -103,18 +109,29 @@ export class CodexClient {
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
     });
+    log("info", "codex.process.start", {
+      command: process.env.CODEX_BIN || "codex",
+      model_context_window: contextWindow,
+      auto_compact_token_limit: autoCompactLimit,
+    });
     this.child = child;
-    child.stderr.on("data", (chunk) => process.stderr.write(chunk));
     child.once("exit", (code, signal) => {
-      this.failAll(new Error(`Codex app-server exited (${code ?? signal ?? "unknown"})`));
+      const error = new Error(`Codex app-server exited (${code ?? signal ?? "unknown"})`);
+      log("error", "codex.process.exit", { exit_code: code, signal });
+      this.failAll(error);
       if (this.child === child) {
         this.child = undefined;
         this.ready = undefined;
       }
     });
-    child.once("error", (error) => this.failAll(error));
+    child.once("error", (error) => {
+      log("error", "codex.process.error", errorFields(error));
+      this.failAll(error);
+    });
     const lines = createInterface({ input: child.stdout });
     lines.on("line", (line) => this.receive(line));
+    const errors = createInterface({ input: child.stderr });
+    errors.on("line", (line) => log("warn", "codex.stderr", { message: line }));
 
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", resolve);
@@ -141,26 +158,66 @@ export class CodexClient {
     try {
       message = JSON.parse(line);
     } catch {
+      log("warn", "codex.rpc.invalid_json", { line_length: line.length });
       return;
     }
     if (message.id !== undefined && ("result" in message || "error" in message)) {
       const pending = this.pending.get(String(message.id));
-      if (!pending) return;
+      if (!pending) {
+        log("warn", "codex.rpc.orphan_response", { rpc_id: message.id });
+        return;
+      }
       clearTimeout(pending.timeout);
       this.pending.delete(String(message.id));
-      if (message.error) pending.reject(Object.assign(new Error(message.error.message), message.error));
-      else pending.resolve(message.result);
+      const fields = {
+        rpc_id: message.id,
+        rpc_method: pending.method,
+        duration_ms: Date.now() - pending.startedAt,
+      };
+      if (message.error) {
+        log("error", "codex.rpc.error", { ...fields, error_code: message.error.code, error_message: message.error.message });
+        pending.reject(Object.assign(new Error(message.error.message), message.error));
+      } else {
+        log("info", "codex.rpc.response", fields);
+        pending.resolve(message.result);
+      }
       return;
     }
     if (message.id !== undefined && message.method) {
-      const respond = (result: unknown) => this.send({ id: message.id, result });
-      const reject = (code: number, text: string) => this.send({ id: message.id, error: { code, message: text } });
+      const params = message.params || {};
+      log("info", "codex.server_request", {
+        rpc_id: message.id,
+        rpc_method: message.method,
+        thread_id: params.threadId,
+        turn_id: params.turnId,
+        call_id: params.callId,
+        tool: params.tool,
+      });
+      const respond = (result: unknown) => {
+        log("info", "codex.server_request.response", { rpc_id: message.id, rpc_method: message.method });
+        this.send({ id: message.id, result });
+      };
+      const reject = (code: number, text: string) => {
+        log("warn", "codex.server_request.rejected", { rpc_id: message.id, rpc_method: message.method, error_code: code, error_message: text });
+        this.send({ id: message.id, error: { code, message: text } });
+      };
       if (this.events.listenerCount("request")) {
         this.events.emit("request", { id: message.id, method: message.method, params: message.params, respond, reject });
       } else {
         reject(-32601, `Unsupported app-server request: ${message.method}`);
       }
       return;
+    }
+    if (message.method !== "item/agentMessage/delta") {
+      const params = message.params || {};
+      log("debug", "codex.notification", {
+        rpc_method: message.method,
+        thread_id: params.threadId || params.thread?.id,
+        parent_thread_id: params.thread?.parentThreadId,
+        turn_id: params.turnId || params.turn?.id,
+        turn_status: params.turn?.status,
+        item_type: params.item?.type,
+      });
     }
     this.events.emit("notification", message);
   }
