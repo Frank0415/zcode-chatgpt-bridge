@@ -407,6 +407,20 @@ export class ResponsesGateway {
       }
       return;
     }
+    if (params.item?.type === "collabAgentToolCall"
+      && typeof params.item.senderThreadId === "string"
+      && Array.isArray(params.item.receiverThreadIds)) {
+      for (const receiverThreadId of params.item.receiverThreadIds) {
+        if (typeof receiverThreadId !== "string") continue;
+        this.parentThreads.set(receiverThreadId, params.item.senderThreadId);
+        log("info", "subagent.thread.linked", {
+          thread_id: receiverThreadId,
+          parent_thread_id: params.item.senderThreadId,
+          collab_tool: params.item.tool,
+          collab_status: params.item.status,
+        });
+      }
+    }
     const session = typeof params.threadId === "string" ? this.turns.get(params.threadId) : undefined;
     if (!session) return;
     if (message.method === "item/agentMessage/delta" && typeof params.delta === "string") {

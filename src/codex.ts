@@ -217,6 +217,10 @@ export class CodexClient {
         turn_id: params.turnId || params.turn?.id,
         turn_status: params.turn?.status,
         item_type: params.item?.type,
+        sender_thread_id: params.item?.senderThreadId,
+        receiver_thread_ids: params.item?.receiverThreadIds,
+        collab_tool: params.item?.tool,
+        collab_status: params.item?.status,
       });
     }
     this.events.emit("notification", message);

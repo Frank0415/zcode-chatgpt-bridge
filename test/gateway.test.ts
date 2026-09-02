@@ -12,12 +12,13 @@ class FakeCodex {
   childToolMode = false;
   parallelToolMode = false;
   failTurnStartOnce = false;
+  uniqueThreads = false;
   dynamicToolName = "";
   turnInput: any[] = [];
   threadStarts = 0;
   turnInputs: any[][] = [];
-  toolResponses = 0;
-  expectedToolResponses = 1;
+  toolResponses = new Map<string, number>();
+  expectedToolResponses = new Map<string, number>();
 
   onNotification(listener: (message: any) => void): () => void {
     this.notifications.push(listener);
@@ -34,7 +35,7 @@ class FakeCodex {
       this.threadStarts += 1;
       this.dynamicToolName = params?.dynamicTools?.[0]?.name || "";
       if (this.dynamicToolName.startsWith("mcp__")) throw new Error("dynamic tool name is reserved");
-      return { thread: { id: "thread-test" } };
+      return { thread: { id: this.uniqueThreads ? `thread-${this.threadStarts}` : "thread-test" } };
     }
     if (method === "thread/resume") return { thread: { id: "thread-test" } };
     if (method === "turn/start") {
@@ -45,20 +46,34 @@ class FakeCodex {
       this.turnInput = params?.input || [];
       this.turnInputs.push(this.turnInput);
       setImmediate(() => {
+        const rootThreadId = params?.threadId || "thread-test";
         if (this.childToolMode) {
-          this.expectedToolResponses = 1;
-          this.emit({ method: "thread/started", params: { thread: { id: "thread-child", parentThreadId: "thread-test" } } });
-          this.emitRequest(this.toolRequest("thread-child", "call-child", 7));
+          const childThreadId = `${rootThreadId}-child`;
+          this.expectedToolResponses.set(rootThreadId, 1);
+          this.emit({
+            method: "item/started",
+            params: {
+              threadId: rootThreadId,
+              item: {
+                type: "collabAgentToolCall",
+                senderThreadId: rootThreadId,
+                receiverThreadIds: [childThreadId],
+                tool: "spawnAgent",
+                status: "completed",
+              },
+            },
+          });
+          this.emitRequest(this.toolRequest(rootThreadId, childThreadId, `call-${childThreadId}`, 7));
         } else if (this.parallelToolMode) {
-          this.expectedToolResponses = 2;
-          this.emitRequest(this.toolRequest("thread-test", "call-one", 7));
-          this.emitRequest(this.toolRequest("thread-test", "call-two", 8));
+          this.expectedToolResponses.set(rootThreadId, 2);
+          this.emitRequest(this.toolRequest(rootThreadId, rootThreadId, "call-one", 7));
+          this.emitRequest(this.toolRequest(rootThreadId, rootThreadId, "call-two", 8));
         } else if (this.toolMode) {
-          this.expectedToolResponses = 1;
-          this.emitRequest(this.toolRequest("thread-test", "call-test", 7));
+          this.expectedToolResponses.set(rootThreadId, 1);
+          this.emitRequest(this.toolRequest(rootThreadId, rootThreadId, "call-test", 7));
         } else {
-          this.emit({ method: "item/agentMessage/delta", params: { threadId: "thread-test", delta: "hello" } });
-          this.emit({ method: "turn/completed", params: { threadId: "thread-test", turn: { status: "completed" } } });
+          this.emit({ method: "item/agentMessage/delta", params: { threadId: rootThreadId, delta: "hello" } });
+          this.emit({ method: "turn/completed", params: { threadId: rootThreadId, turn: { status: "completed" } } });
         }
       });
       return { turn: { id: "turn-test" } };
@@ -76,17 +91,18 @@ class FakeCodex {
   emit(message: any): void { for (const listener of this.notifications) listener(message); }
   emitRequest(message: any): void { for (const listener of this.requests) listener(message); }
 
-  toolRequest(threadId: string, callId: string, id: number): any {
+  toolRequest(rootThreadId: string, threadId: string, callId: string, id: number): any {
     return {
       id,
       method: "item/tool/call",
       params: { threadId, turnId: "turn-test", callId, tool: this.dynamicToolName, arguments: { path: "a.txt" } },
       respond: () => {
-        this.toolResponses += 1;
-        if (this.toolResponses !== this.expectedToolResponses) return;
+        const responses = (this.toolResponses.get(rootThreadId) || 0) + 1;
+        this.toolResponses.set(rootThreadId, responses);
+        if (responses !== this.expectedToolResponses.get(rootThreadId)) return;
         setImmediate(() => {
-          this.emit({ method: "item/agentMessage/delta", params: { threadId: "thread-test", delta: "tool result accepted" } });
-          this.emit({ method: "turn/completed", params: { threadId: "thread-test", turn: { status: "completed" } } });
+          this.emit({ method: "item/agentMessage/delta", params: { threadId: rootThreadId, delta: "tool result accepted" } });
+          this.emit({ method: "turn/completed", params: { threadId: rootThreadId, turn: { status: "completed" } } });
         });
       },
       reject: () => undefined,
@@ -178,13 +194,37 @@ test("routes subagent dynamic tool calls through the parent Responses session", 
     tools: [{ type: "function", name: "lookup_value", parameters: { type: "object" } }],
   });
   assert.equal(first.output[0].type, "function_call");
-  assert.equal(first.output[0].call_id, "call-child");
+  assert.equal(first.output[0].call_id, "call-thread-test-child");
   const second = await setup.gateway.create({
     model: "gpt-test",
     previous_response_id: first.id,
-    input: [{ type: "function_call_output", call_id: "call-child", output: "value" }],
+    input: [{ type: "function_call_output", call_id: "call-thread-test-child", output: "value" }],
   });
   assert.equal(second.output_text, "tool result accepted");
+});
+
+test("routes concurrent subagent tool calls to their respective parent sessions", async () => {
+  const setup = await gateway();
+  setup.fake.childToolMode = true;
+  setup.fake.uniqueThreads = true;
+  const request = (label: string) => setup.gateway.create({
+    model: "gpt-test",
+    input: `delegate ${label}`,
+    tools: [{ type: "function", name: "lookup_value", parameters: { type: "object" } }],
+  });
+  const [first, second] = await Promise.all([request("one"), request("two")]);
+  assert.deepEqual(
+    new Set([first.output[0].call_id, second.output[0].call_id]),
+    new Set(["call-thread-1-child", "call-thread-2-child"]),
+  );
+  const finish = (response: any) => setup.gateway.create({
+    model: "gpt-test",
+    previous_response_id: response.id,
+    input: [{ type: "function_call_output", call_id: response.output[0].call_id, output: "value" }],
+  });
+  const [firstDone, secondDone] = await Promise.all([finish(first), finish(second)]);
+  assert.equal(firstDone.output_text, "tool result accepted");
+  assert.equal(secondDone.output_text, "tool result accepted");
 });
 
 test("drains concurrent tool calls without leaving the Codex turn stuck", async () => {
