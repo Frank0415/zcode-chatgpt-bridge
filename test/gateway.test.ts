@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ResponsesGateway, formatInput, toCodexInput } from "../src/gateway.ts";
+import { ResponsesGateway, extractDeveloperInstructions, formatInput, toolOutputFailureCode, toCodexInput } from "../src/gateway.ts";
 
 class FakeCodex {
   notifications: Array<(message: any) => void> = [];
@@ -14,8 +14,12 @@ class FakeCodex {
   failTurnStartOnce = false;
   uniqueThreads = false;
   dynamicToolName = "";
+  dynamicTools: any[] = [];
+  toolArguments: any = { path: "a.txt" };
+  usageMode = false;
   turnInput: any[] = [];
   threadStarts = 0;
+  threadStartParams: any[] = [];
   turnInputs: any[][] = [];
   turnStarts: any[] = [];
   toolResponses = new Map<string, number>();
@@ -34,6 +38,8 @@ class FakeCodex {
   async request(method: string, params?: any): Promise<any> {
     if (method === "thread/start") {
       this.threadStarts += 1;
+      this.threadStartParams.push(params);
+      this.dynamicTools = params?.dynamicTools || [];
       this.dynamicToolName = params?.dynamicTools?.[0]?.name || "";
       if (this.dynamicToolName.startsWith("mcp__")) throw new Error("dynamic tool name is reserved");
       return { thread: { id: this.uniqueThreads ? `thread-${this.threadStarts}` : "thread-test" } };
@@ -53,6 +59,18 @@ class FakeCodex {
       this.turnStarts.push(params);
       setImmediate(() => {
         const rootThreadId = params?.threadId || "thread-test";
+        if (this.usageMode) {
+          this.emit({
+            method: "thread/tokenUsage/updated",
+            params: {
+              threadId: rootThreadId,
+              turnId: "turn-test",
+              tokenUsage: {
+                last: { inputTokens: 100, cachedInputTokens: 40, outputTokens: 20, reasoningOutputTokens: 5, totalTokens: 120 },
+              },
+            },
+          });
+        }
         if (this.childToolMode) {
           const childThreadId = `${rootThreadId}-child`;
           this.expectedToolResponses.set(rootThreadId, 1);
@@ -88,7 +106,7 @@ class FakeCodex {
     return {
       id,
       method: "item/tool/call",
-      params: { threadId, turnId: "turn-test", callId, tool: this.dynamicToolName, arguments: { path: "a.txt" } },
+      params: { threadId, turnId: "turn-test", callId, tool: this.dynamicToolName, arguments: this.toolArguments },
       respond: () => {
         const responses = (this.toolResponses.get(rootThreadId) || 0) + 1;
         this.toolResponses.set(rootThreadId, responses);
@@ -132,6 +150,55 @@ test("passes the Max reasoning-effort choice through to Codex", async () => {
   });
   assert.equal(setup.fake.turnStarts.at(-1).model, "gpt-5.6-sol");
   assert.equal(setup.fake.turnStarts.at(-1).effort, "max");
+});
+
+test("passes ZCode developer messages as app-server developer instructions", async () => {
+  const setup = await gateway();
+  await setup.gateway.create({
+    model: "gpt-test",
+    instructions: "response-scoped rule",
+    input: [
+      { role: "developer", content: "ZCode harness" },
+      { role: "system", content: [{ type: "input_text", text: "workspace rule" }] },
+      { role: "user", content: "hello" },
+    ],
+  });
+  assert.equal(
+    setup.fake.threadStartParams[0].developerInstructions,
+    "response-scoped rule\n\nZCode harness\n\nworkspace rule",
+  );
+  assert.deepEqual(setup.fake.turnInput, [{ type: "text", text: "user: hello" }]);
+  assert.equal(extractDeveloperInstructions([{ role: "developer", content: "rule" }]), "rule");
+});
+
+test("passes Responses compatibility controls to app-server", async () => {
+  const setup = await gateway();
+  await setup.gateway.create({
+    model: "gpt-test",
+    reasoning_effort: "max",
+    reasoning: { summary: "detailed" },
+    service_tier: "priority",
+    text: { format: { type: "json_schema", schema: { type: "object" } } },
+    input: "return json",
+  });
+  assert.equal(setup.fake.threadStartParams[0].serviceTier, "priority");
+  assert.equal(setup.fake.turnStarts[0].effort, "max");
+  assert.equal(setup.fake.turnStarts[0].summary, "detailed");
+  assert.equal(setup.fake.turnStarts[0].serviceTier, "priority");
+  assert.deepEqual(setup.fake.turnStarts[0].outputSchema, { type: "object" });
+});
+
+test("returns native Codex token usage in Responses format", async () => {
+  const setup = await gateway();
+  setup.fake.usageMode = true;
+  const result = await setup.gateway.create({ model: "gpt-test", input: "count usage" });
+  assert.deepEqual(result.usage, {
+    input_tokens: 100,
+    input_tokens_details: { cached_tokens: 40 },
+    output_tokens: 20,
+    output_tokens_details: { reasoning_tokens: 5 },
+    total_tokens: 120,
+  });
 });
 
 test("passes Responses image input to native Codex image input", () => {
@@ -317,6 +384,44 @@ test("maps ZCode MCP tool names around Codex reserved namespaces", async () => {
   });
   assert.match(setup.fake.dynamicToolName, /^zcode_/);
   assert.equal(result.output[0].name, "mcp__node_repl__js");
+});
+
+test("guides native ZCode agent routing and handles an invalid Codex root alias internally", async () => {
+  const setup = await gateway();
+  setup.fake.toolMode = true;
+  setup.fake.toolArguments = { to: "/root", summary: "done", message: "result" };
+  const result = await setup.gateway.create({
+    model: "gpt-test",
+    input: "report to parent",
+    tools: [{
+      type: "function",
+      name: "SendMessage",
+      description: "Send a message to a ZCode agent.",
+      parameters: { type: "object", properties: { to: { type: "string" } } },
+    }],
+  });
+  assert.match(setup.fake.dynamicTools[0].description, /Never use \/root/);
+  assert.equal(result.output_text, "tool result accepted");
+  assert.equal(result.output[0].type, "message");
+});
+
+test("keeps valid ZCode agent recipients as ordinary Responses tool calls", async () => {
+  const setup = await gateway();
+  setup.fake.toolMode = true;
+  setup.fake.toolArguments = { to: "agent_1234-abcd", summary: "continue", message: "more" };
+  const result = await setup.gateway.create({
+    model: "gpt-test",
+    input: "send follow-up",
+    tools: [{ type: "function", name: "SendMessage", parameters: { type: "object" } }],
+  });
+  assert.equal(result.output[0].type, "function_call");
+  assert.equal(result.output[0].name, "SendMessage");
+});
+
+test("classifies tool failures without retaining tool output text", () => {
+  assert.equal(toolOutputFailureCode("No active local_agent task found for target /root."), "no_active_local_agent");
+  assert.equal(toolOutputFailureCode('{"state":{"status":"failed"}}'), "reported_failed");
+  assert.equal(toolOutputFailureCode("normal tool output"), undefined);
 });
 
 test("returns a standard-shaped compaction backed by native Codex compaction", async () => {

@@ -32,6 +32,7 @@ type TurnSession = {
   text: string;
   phase: Deferred<Phase>;
   phaseDone: boolean;
+  usage: TokenUsage;
   onDelta?: (delta: string) => void;
 };
 
@@ -39,6 +40,15 @@ type PendingTool = {
   session: TurnSession;
   request: ServerRequest;
   timeout: ReturnType<typeof setTimeout>;
+  originalTool: string;
+};
+
+type TokenUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
 };
 
 export type ResponseEvent = { type: string; [key: string]: unknown };
@@ -157,6 +167,7 @@ export class ResponsesGateway {
       session.text = "";
       session.phase = deferred<Phase>();
       session.phaseDone = false;
+      session.usage = zeroTokenUsage();
       session.onDelta = (delta) => emit?.({
         ...(startMessageStream(), {
           type: "response.output_text.delta",
@@ -175,6 +186,10 @@ export class ResponsesGateway {
           response_id: responseId,
           thread_id: session.threadId,
           call_id: entry.output.callId,
+          tool: entry.pending!.originalTool,
+          output_bytes: Buffer.byteLength(entry.output.output),
+          reported_failure: Boolean(toolOutputFailureCode(entry.output.output)),
+          failure_code: toolOutputFailureCode(entry.output.output),
         });
         entry.pending!.request.respond({
           success: true,
@@ -183,7 +198,8 @@ export class ResponsesGateway {
       }
       this.activatePendingTool(session);
     } else {
-      threadId = await this.resolveThread(body, model);
+      const developerInstructions = extractDeveloperInstructions(body.input, body.instructions);
+      threadId = await this.resolveThread(body, model, developerInstructions);
       if (this.turns.has(threadId)) throw new Error("The previous response is still waiting for a tool output");
       session = {
         responseId,
@@ -192,6 +208,7 @@ export class ResponsesGateway {
         text: "",
         phase: deferred<Phase>(),
         phaseDone: false,
+        usage: zeroTokenUsage(),
       };
       session.onDelta = (delta) => emit?.({
         ...(startMessageStream(), {
@@ -204,14 +221,17 @@ export class ResponsesGateway {
       });
       this.turns.set(threadId, session);
       phasePromise = session.phase.promise;
-      const input = toCodexInput(this.newInput(body.input), body.instructions);
+      const input = toCodexInput(this.newInput(body.input));
       if (!input.length) {
         this.turns.delete(threadId);
         if (receivedToolOutputs.length) throw new Error("No pending Codex tool call matches function_call_output");
         throw new Error("input must contain text or an image");
       }
       try {
-        const effort = body.reasoning?.effort;
+        const effort = body.reasoning?.effort || body.reasoning_effort;
+        const summary = body.reasoning?.summary;
+        const serviceTier = body.service_tier || body.serviceTier;
+        const outputSchema = body.text?.format?.schema || body.response_format?.json_schema?.schema;
         const result = await this.codex.request("turn/start", {
           threadId,
           input,
@@ -219,9 +239,21 @@ export class ResponsesGateway {
           approvalPolicy: "never",
           sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" } },
           ...(effort ? { effort } : {}),
+          ...(summary ? { summary } : {}),
+          ...(serviceTier ? { serviceTier } : {}),
+          ...(outputSchema && typeof outputSchema === "object" ? { outputSchema } : {}),
         });
         session.turnId = result?.turn?.id;
-        log("info", "turn.start", { response_id: responseId, thread_id: threadId, turn_id: session.turnId, model, reasoning_effort: effort });
+        log("info", "turn.start", {
+          response_id: responseId,
+          thread_id: threadId,
+          turn_id: session.turnId,
+          model,
+          reasoning_effort: effort,
+          reasoning_summary: summary,
+          service_tier: serviceTier,
+          has_output_schema: Boolean(outputSchema),
+        });
       } catch (error) {
         this.turns.delete(threadId);
         log("error", "turn.start.failed", { response_id: responseId, thread_id: threadId, ...errorFields(error) });
@@ -253,7 +285,7 @@ export class ResponsesGateway {
       output_text: phase.kind === "message" ? phase.text : "",
       error: phase.kind === "message" && phase.error ? { code: "codex_error", message: phase.error } : null,
       incomplete_details: null,
-      usage: emptyUsage(),
+      usage: responsesUsage(session.usage),
     };
     this.state.responses[responseId] = {
       threadId,
@@ -325,7 +357,7 @@ export class ResponsesGateway {
     await this.codex.close();
   }
 
-  private async resolveThread(body: JsonObject, model: string): Promise<string> {
+  private async resolveThread(body: JsonObject, model: string, developerInstructions?: string): Promise<string> {
     const existing = this.threadFromBody(body);
     if (existing) {
       await this.ensureThread(existing, model);
@@ -339,6 +371,8 @@ export class ResponsesGateway {
       approvalPolicy: "never",
       sandbox: "read-only",
       serviceName: "zcode_chatgpt_bridge",
+      ...(developerInstructions ? { developerInstructions } : {}),
+      ...((body.service_tier || body.serviceTier) ? { serviceTier: body.service_tier || body.serviceTier } : {}),
       ...(mappedTools.tools.length ? { dynamicTools: mappedTools.tools } : {}),
     });
     const threadId = result?.thread?.id;
@@ -418,6 +452,24 @@ export class ResponsesGateway {
       }
       return;
     }
+    if (message.method === "thread/tokenUsage/updated") {
+      const session = typeof params.threadId === "string" ? this.turns.get(params.threadId) : undefined;
+      const usage = params.tokenUsage?.last;
+      if (session && usage) {
+        session.usage = addTokenUsage(session.usage, usage);
+        log("info", "turn.usage", {
+          response_id: session.responseId,
+          thread_id: session.threadId,
+          turn_id: params.turnId || session.turnId,
+          input_tokens: session.usage.inputTokens,
+          cached_input_tokens: session.usage.cachedInputTokens,
+          output_tokens: session.usage.outputTokens,
+          reasoning_output_tokens: session.usage.reasoningOutputTokens,
+          total_tokens: session.usage.totalTokens,
+        });
+      }
+      return;
+    }
     if (params.item?.type === "collabAgentToolCall"
       && typeof params.item.senderThreadId === "string"
       && Array.isArray(params.item.receiverThreadIds)) {
@@ -488,6 +540,26 @@ export class ResponsesGateway {
       request.reject(-32004, "No active Responses request for this tool call");
       return;
     }
+    const originalTool = this.toolNamesByThread.get(session.threadId)?.get(String(params.tool)) || String(params.tool);
+    if (originalTool === "SendMessage" && !validZCodeAgentRecipient(params.arguments?.to)) {
+      log("warn", "tool.call.invalid_recipient", {
+        response_id: session.responseId,
+        thread_id: params.threadId,
+        root_thread_id: session.threadId,
+        turn_id: params.turnId,
+        call_id: params.callId,
+        tool: originalTool,
+        recipient_kind: params.arguments?.to === "/root" ? "codex_root_alias" : "invalid",
+      });
+      request.respond({
+        success: true,
+        contentItems: [{
+          type: "inputText",
+          text: "ZCode SendMessage was not executed: 'to' must be the live agent_<uuid> returned by the ZCode Agent tool. /root is a Codex alias and is not a valid ZCode agent ID. Foreground Agent results return automatically.",
+        }],
+      });
+      return;
+    }
     const callId = String(params.callId);
     const timeout = setTimeout(() => {
       const pending = this.pendingTools.get(callId);
@@ -504,14 +576,14 @@ export class ResponsesGateway {
       });
     }, this.toolOutputTimeoutMs);
     timeout.unref?.();
-    this.pendingTools.set(callId, { session, request, timeout });
+    this.pendingTools.set(callId, { session, request, timeout, originalTool });
     log("info", "tool.call", {
       response_id: session.responseId,
       thread_id: params.threadId,
       root_thread_id: session.threadId,
       turn_id: params.turnId,
       call_id: callId,
-      tool: params.tool,
+      tool: originalTool,
       from_subagent: params.threadId !== session.threadId,
     });
     this.activatePendingTool(session);
@@ -721,6 +793,34 @@ function emptyUsage(): JsonObject {
   };
 }
 
+function zeroTokenUsage(): TokenUsage {
+  return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 };
+}
+
+function addTokenUsage(current: TokenUsage, value: JsonObject): TokenUsage {
+  return {
+    inputTokens: current.inputTokens + nonNegativeInteger(value.inputTokens),
+    cachedInputTokens: current.cachedInputTokens + nonNegativeInteger(value.cachedInputTokens),
+    outputTokens: current.outputTokens + nonNegativeInteger(value.outputTokens),
+    reasoningOutputTokens: current.reasoningOutputTokens + nonNegativeInteger(value.reasoningOutputTokens),
+    totalTokens: current.totalTokens + nonNegativeInteger(value.totalTokens),
+  };
+}
+
+function responsesUsage(usage: TokenUsage): JsonObject {
+  return {
+    input_tokens: usage.inputTokens,
+    input_tokens_details: { cached_tokens: usage.cachedInputTokens },
+    output_tokens: usage.outputTokens,
+    output_tokens_details: { reasoning_tokens: usage.reasoningOutputTokens },
+    total_tokens: usage.totalTokens,
+  };
+}
+
+function nonNegativeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
 function mapTools(tools: unknown): { tools: JsonObject[]; names: Map<string, string> } {
   const names = new Map<string, string>();
   if (!Array.isArray(tools)) return { tools: [], names };
@@ -733,11 +833,25 @@ function mapTools(tools: unknown): { tools: JsonObject[]; names: Map<string, str
     return [{
       type: "function",
       name: safeName,
-      description: `[ZCode tool: ${source.name}] ${typeof source.description === "string" ? source.description : ""}`,
+      description: `[ZCode tool: ${source.name}] ${typeof source.description === "string" ? source.description : ""}${toolCompatibilityGuidance(source.name)}`,
       inputSchema: source.parameters || { type: "object", properties: {} },
     }];
   });
   return { tools: mapped, names };
+}
+
+function toolCompatibilityGuidance(name: string): string {
+  if (name === "Agent") {
+    return "\n\n[Bridge compatibility] When the user requests GPT-5.6 Luna with Max reasoning, select subagent_type 'chatgpt-bridge-luna-max'. Do not claim that model or effort unless that exact ZCode subagent type is available and invoked.";
+  }
+  if (name === "SendMessage") {
+    return "\n\n[Bridge compatibility] The recipient must be the exact live agent_<uuid> returned by the ZCode Agent tool. Never use /root. Foreground Agent results return automatically and do not require SendMessage.";
+  }
+  return "";
+}
+
+function validZCodeAgentRecipient(value: unknown): boolean {
+  return typeof value === "string" && /^agent_[A-Za-z0-9-]+$/.test(value);
 }
 
 function safeToolName(name: string, index: number): string {
@@ -760,6 +874,19 @@ export function formatInput(input: unknown, instructions?: unknown): string {
     .join("\n\n");
 }
 
+export function extractDeveloperInstructions(input: unknown, instructions?: unknown): string | undefined {
+  const chunks: string[] = [];
+  if (typeof instructions === "string" && instructions.trim()) chunks.push(instructions.trim());
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item || (item.role !== "developer" && item.role !== "system")) continue;
+      const text = inputItemText(item);
+      if (text) chunks.push(text);
+    }
+  }
+  return chunks.length ? chunks.join("\n\n") : undefined;
+}
+
 export function toCodexInput(input: unknown, instructions?: unknown): JsonObject[] {
   const result: JsonObject[] = [];
   const chunks: string[] = [];
@@ -769,6 +896,7 @@ export function toCodexInput(input: unknown, instructions?: unknown): JsonObject
     for (const item of input) {
       if (!item || item.type === "function_call_output" || item.type === "compaction") continue;
       const role = typeof item.role === "string" ? item.role : "user";
+      if (role === "developer" || role === "system") continue;
       if (item.type === "input_image") {
         result.push(imageInput(item));
       } else if (typeof item.content === "string") chunks.push(`${role}: ${item.content}`);
@@ -786,6 +914,35 @@ export function toCodexInput(input: unknown, instructions?: unknown): JsonObject
   }
   if (chunks.length) result.unshift({ type: "text", text: chunks.join("\n\n") });
   return result;
+}
+
+function inputItemText(item: JsonObject): string {
+  if (typeof item.content === "string") return item.content.trim();
+  if (typeof item.text === "string") return item.text.trim();
+  if (!Array.isArray(item.content)) return "";
+  return item.content
+    .map((part: JsonObject) => typeof part?.text === "string" ? part.text : "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+export function toolOutputFailureCode(output: string): string | undefined {
+  const normalized = output.trim().toLowerCase();
+  if (!normalized) return undefined;
+  try {
+    const parsed = JSON.parse(output);
+    const status = String(parsed?.state?.status || parsed?.metadata?.display?.status || parsed?.status || "").toLowerCase();
+    if (["failed", "error", "cancelled"].includes(status)) return `reported_${status}`;
+  } catch {
+    // Plain-text tool outputs are normal.
+  }
+  if (normalized.includes("no active local_agent task")) return "no_active_local_agent";
+  if (normalized.includes("timed out") || normalized.includes("timeout")) return "timeout";
+  if (normalized.includes("permission denied") || normalized.includes("was declined")) return "permission_denied";
+  if (normalized.startsWith("skill not found") || normalized.startsWith("not found")) return "not_found";
+  if (normalized.startsWith("error:") || normalized.startsWith("failed:")) return "reported_error";
+  return undefined;
 }
 
 function imageInput(part: JsonObject): JsonObject {
