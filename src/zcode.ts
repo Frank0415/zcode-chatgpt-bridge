@@ -56,7 +56,7 @@ export async function configureZCodeReasoning(
         ...existing,
         enabled: true,
         variants,
-        defaultVariant: typeof existing.defaultVariant === "string" ? existing.defaultVariant : "medium",
+        defaultVariant: modelId === "gpt-5.6-luna" ? "max" : "high",
       };
       if (JSON.stringify(model.reasoning) === JSON.stringify(reasoning)) continue;
       model.reasoning = reasoning;

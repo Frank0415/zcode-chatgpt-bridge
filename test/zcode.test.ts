@@ -31,7 +31,8 @@ test("adds Max to matching ZCode bridge models without changing unrelated provid
   for (const id of ["gpt-5.6-sol", "gpt-5.6-luna"]) {
     assert.deepEqual(updated.provider.bridge.models[id].reasoning.variants.slice(0, 5), [...gpt56ReasoningVariants]);
   }
-  assert.equal(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.defaultVariant, "high");
+  assert.equal(updated.provider.bridge.models["gpt-5.6-sol"].reasoning.defaultVariant, "high");
+  assert.equal(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.defaultVariant, "max");
   assert.deepEqual(updated.provider.bridge.models["gpt-5.6-luna"].reasoning.aliases, { extra: "xhigh" });
   assert.equal(updated.provider.bridge.options.apiKey, "preserve-me");
   assert.equal(updated.provider.unrelated.options.apiKey, "untouched");
