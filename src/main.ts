@@ -4,6 +4,7 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareBridgeRuntime } from "./runtime.ts";
 import { startServer } from "./server.ts";
 
 const endpoint = "http://127.0.0.1:9099/v1";
@@ -78,6 +79,7 @@ async function install(): Promise<void> {
   await mkdir(dirname(binPath), { recursive: true });
   const nodePath = process.execPath;
   await writeFile(binPath, `#!/bin/sh\nexec ${shellQuote(nodePath)} ${shellQuote(join(installRoot, "src", "main.ts"))} "$@"\n`, { mode: 0o755 });
+  const runtime = await prepareBridgeRuntime();
   if (platform() === "darwin") {
     await installLaunchAgent(userHome, nodePath, installRoot);
   } else {
@@ -111,13 +113,14 @@ WantedBy=default.target
   }
 
   await waitForService();
-  console.log(`Installed and running. Endpoint: ${endpoint}`);
+  console.log(`Installed and running. Endpoint: ${endpoint}\nIsolated Codex home: ${runtime.paths.codexHome}`);
 }
 
 async function status(): Promise<void> {
   try {
     const result = await get("/bridge/status");
     console.log(`Service: running\nEndpoint: ${result.endpoint}\nChatGPT: ${result.authenticated ? "signed in" : "not signed in"}`);
+    console.log(`Codex profile: ${result.isolated ? "isolated" : "shared"}${result.codex_home ? `\nCodex home: ${result.codex_home}` : ""}`);
     if (result.account?.email) console.log(`Account: ${result.account.email}`);
     if (result.account?.planType) console.log(`Plan: ${result.account.planType}`);
   } catch {

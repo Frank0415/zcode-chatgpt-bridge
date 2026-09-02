@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { errorFields, log } from "./log.ts";
+import { prepareBridgeRuntime } from "./runtime.ts";
 
 export type RpcMessage = {
   id?: number | string;
@@ -94,6 +95,7 @@ export class CodexClient {
   }
 
   private async startProcess(): Promise<void> {
+    const runtime = await prepareBridgeRuntime();
     const contextWindow = positiveIntegerEnvironment("BRIDGE_MODEL_CONTEXT_WINDOW", 1_050_000);
     const autoCompactLimit = positiveIntegerEnvironment("BRIDGE_AUTO_COMPACT_TOKEN_LIMIT", 900_000);
     if (autoCompactLimit >= contextWindow) {
@@ -107,12 +109,16 @@ export class CodexClient {
       "--stdio",
     ], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      cwd: runtime.paths.workspace,
+      env: { ...process.env, CODEX_HOME: runtime.paths.codexHome },
     });
     log("info", "codex.process.start", {
       command: process.env.CODEX_BIN || "codex",
       model_context_window: contextWindow,
       auto_compact_token_limit: autoCompactLimit,
+      codex_home: runtime.paths.codexHome,
+      cwd: runtime.paths.workspace,
+      isolated: true,
     });
     this.child = child;
     child.once("exit", (code, signal) => {

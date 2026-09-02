@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { CodexClient, type RpcMessage, type ServerRequest } from "./codex.ts";
 import { errorFields, log } from "./log.ts";
+import { bridgeRuntimePaths } from "./runtime.ts";
 
 type JsonObject = Record<string, any>;
 
@@ -83,10 +84,14 @@ export class ResponsesGateway {
 
   async account(): Promise<JsonObject> {
     const result = await this.codex.request("account/read", { refreshToken: false });
+    const runtime = bridgeRuntimePaths();
     return {
       authenticated: Boolean(result?.account),
       account: result?.account ?? null,
       requires_openai_auth: result?.requiresOpenaiAuth ?? true,
+      isolated: true,
+      codex_home: runtime.codexHome,
+      workspace: runtime.workspace,
     };
   }
 
@@ -324,7 +329,7 @@ export class ResponsesGateway {
     const result = await this.codex.request("thread/start", {
       model,
       modelProvider: "openai",
-      cwd: process.env.BRIDGE_CWD || homedir(),
+      cwd: bridgeRuntimePaths().workspace,
       approvalPolicy: "never",
       sandbox: "read-only",
       serviceName: "zcode_chatgpt_bridge",

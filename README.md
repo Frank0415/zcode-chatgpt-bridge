@@ -15,6 +15,8 @@ The install command creates and starts a launchd agent on macOS or a systemd use
 
 The bridge starts Codex with a 1,050,000-token context window and native automatic compaction at 900,000 total tokens. Override these defaults with `BRIDGE_MODEL_CONTEXT_WINDOW` and `BRIDGE_AUTO_COMPACT_TOKEN_LIMIT` when running the service manually.
 
+The Codex app-server runs in an isolated profile under `~/.local/share/zcode-chatgpt-bridge/codex-home`, with a separate empty workspace. It does not read the machine's `~/.codex/config.toml`, plugins, hooks, skills, history, or project instructions. On first install only, an existing file-based `~/.codex/auth.json` is copied into the isolated profile so the bridge stays signed in; later login, refresh, and logout state is independent.
+
 ## Add it to ZCode
 
 Open ZCode Model Settings, add a custom provider, and enter:
