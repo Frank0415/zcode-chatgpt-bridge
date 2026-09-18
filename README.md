@@ -1,3 +1,5 @@
+# Since ZCode was caught uploading workspace/.git records to the cloud silently, anyone using should not using ZCode for data security. This project will not be updated or maintained further.
+
 # ZCode ChatGPT Bridge
 
 A small local service that lets ZCode use a ChatGPT/Codex subscription through an OpenAI Responses-compatible endpoint. It uses the official `codex app-server` for ChatGPT authentication, model access, persistent Codex threads, and native conversation compaction. No OpenAI API key is needed.
